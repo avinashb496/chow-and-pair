@@ -57,6 +57,20 @@ function initials(name){ return String(name||"").trim().split(/\s+/).map(functio
 function payInfo(v){ for(var i=0;i<PAY.length;i++) if(PAY[i].v===v) return PAY[i]; return PAY[2]; }
 function isClosed(b){ return CLOSED.indexOf(b.stage)>=0; }
 
+function setHTML(el, html){
+  /* Re-rendering a modal while an input still has focus makes the browser
+     fire blur mid-teardown, and innerHTML then throws. Blur first, and keep
+     a manual fallback for the case where it still objects. */
+  try{
+    var a=document.activeElement;
+    if(a && a.blur && el.contains(a)) a.blur();
+  }catch(e){}
+  try{ el.innerHTML = html; }
+  catch(e){
+    while(el.firstChild) el.removeChild(el.firstChild);
+    el.insertAdjacentHTML("beforeend", html);
+  }
+}
 function toast(msg){
   var r=$("#toastRoot"); r.innerHTML="";
   var t=el("div",{class:"toast"},esc(msg)); r.appendChild(t);
@@ -99,6 +113,9 @@ function leadIn(r){
     learnClasses: r.learn_classes == null ? "" : +r.learn_classes,
     learnPrice:   r.learn_price   == null ? "" : +r.learn_price,
     notes:r.notes||"", stage:r.stage, customerId:r.customer_id||"",
+    paymentState:  r.payment_state||"none",
+    amountReceived: r.amount_received==null ? 0 : +r.amount_received,
+    partySize:      r.party_size==null ? 1 : +r.party_size,
     createdBy:r.created_by||"", createdAt:r.created_at||"" };
 }
 function leadOut(l){
@@ -109,6 +126,9 @@ function leadOut(l){
     learn_classes: ( learn && l.learnClasses!== "" && l.learnClasses!= null) ? +l.learnClasses: null,
     learn_price:   ( learn && l.learnPrice  !== "" && l.learnPrice  != null) ? +l.learnPrice  : null,
     notes:l.notes||"", stage:l.stage, customer_id:l.customerId||null,
+    payment_state:   l.paymentState||"none",
+    amount_received: (l.paymentState==="none" ? 0 : (+l.amountReceived||0)),
+    party_size:      Math.min(12, Math.max(1, +l.partySize||1)),
     created_by:l.createdBy||perm.name||"" };
 }
 function digitsOf(v){ return String(v||"").replace(/\D/g,""); }
@@ -160,7 +180,8 @@ function loadAll(){
     if(s){
       DB.settings = { open:hhmm(s.open_time), close:hhmm(s.close_time), slot:+s.slot_minutes,
         defPlay:+s.default_play_minutes, defLearn:+s.default_learn_minutes,
-        ratePlay:+s.rate_play, rateLearn:+s.rate_learn };
+        ratePlay:+s.rate_play, rateLearn:+s.rate_learn,
+        tokenDeposit: s.token_deposit==null ? 50 : +s.token_deposit };
       DB.sources = s.sources && s.sources.length ? s.sources : DB.sources;
     }
     DB.staff = (r[5] && !r[5].error && r[5].data) ? r[5].data : [];
@@ -234,7 +255,8 @@ function putConfig(which){
   return sb.from("settings").update({
     open_time:s.open, close_time:s.close, slot_minutes:s.slot,
     default_play_minutes:s.defPlay, default_learn_minutes:s.defLearn,
-    rate_play:s.ratePlay, rate_learn:s.rateLearn, sources:DB.sources
+    rate_play:s.ratePlay, rate_learn:s.rateLearn, token_deposit:s.tokenDeposit,
+    sources:DB.sources
   }).eq("id",1).then(function(r){ if(r.error) throw r.error; });
 }
 function putLead(rec){
@@ -285,7 +307,8 @@ function banner(){ return ""; }
 var DB = {
   teachers:[], tables:[], customers:[], bookings:[], staff:[], leads:[],
   sources:["Instagram","Walk-in","Referral","WhatsApp","Google","Event","Other"],
-  settings:{ open:"10:00", close:"22:00", slot:30, defPlay:120, defLearn:90, ratePlay:2400, rateLearn:3200 }
+  settings:{ open:"10:00", close:"22:00", slot:30, defPlay:120, defLearn:90,
+             ratePlay:2400, rateLearn:3200, tokenDeposit:50 }
 };
 
 var state = {
@@ -620,7 +643,8 @@ function openBooking(id, pre){
   var existing = id ? DB.bookings.filter(function(b){return b.id===id;})[0] : null;
   var c = existing ? customer(existing.customerId) : null;
   var startDefault = pre.start || "11:00";
-  var typeDefault = existing ? existing.type : "play";
+  var typeDefault = existing ? existing.type : (pre.type || "play");
+  var preCust = pre.customerId ? customer(pre.customerId) : null;
   var d = existing ? {
       id:existing.id, customerId:existing.customerId, customerName:c.name, phone:c.phone, email:c.email||"",
       source:c.source||"Walk-in", custNotes:c.notes||"",
@@ -628,11 +652,21 @@ function openBooking(id, pre){
       tableId:existing.tableId, teacherId:existing.teacherId, payment:existing.payment,
       amountDue:existing.amountDue, amountPaid:existing.amountPaid, stage:existing.stage, notes:existing.notes||""
     } : {
-      id:null, customerId:"", customerName:"", phone:"", email:"", source:"Instagram", custNotes:"",
+      id:null,
+      customerId: pre.customerId||"",
+      customerName: preCust ? preCust.name : "",
+      phone: preCust ? preCust.phone : "",
+      email: preCust ? (preCust.email||"") : "",
+      source: preCust ? (preCust.source||"Instagram") : "Instagram",
+      custNotes:"",
       type:typeDefault, guests:pre.guests||4, date:pre.date||today(), start:startDefault,
-      end:pre.end || m2t(t2m(startDefault)+DB.settings.defPlay),
-      tableId: pre.tableId || (activeTables()[0]||{}).id, teacherId:"", payment:"unpaid",
-      amountDue:DB.settings.ratePlay, amountPaid:0, stage:"New Lead", notes:""
+      end: pre.end || m2t(t2m(startDefault)+(typeDefault==="learn"?DB.settings.defLearn:DB.settings.defPlay)),
+      tableId: pre.tableId || (activeTables()[0]||{}).id, teacherId:"",
+      payment: pre.payment || "unpaid",
+      amountDue: pre.amountDue!=null ? +pre.amountDue
+                 : (typeDefault==="learn" ? DB.settings.rateLearn : DB.settings.ratePlay),
+      amountPaid: pre.amountPaid!=null ? +pre.amountPaid : 0,
+      stage: pre.stage || "New Lead", notes:""
     };
   var override=false;
 
@@ -727,7 +761,7 @@ function openBooking(id, pre){
        (d.id?"Save changes":"Create booking")+'</button></div>';
     h+='</footer></div></div>';
 
-    root.innerHTML=h;
+    setHTML(root, h);
     wire();
   }
 
@@ -999,6 +1033,18 @@ function leadQuote(l){
   }
   return (l.playPrice!=="" && l.playPrice!=null) ? inr(l.playPrice) : "Not quoted yet";
 }
+var PAYSTATE = {
+  none:  { label:"Settling at the venue", short:"At venue", cls:"unpaid" },
+  token: { label:"Token taken",           short:"Token",    cls:"part"   },
+  paid:  { label:"Paid in full",          short:"Paid",     cls:"paid"   }
+};
+function payInfoLead(l){ return PAYSTATE[l.paymentState] || PAYSTATE.none; }
+function quoteOf(l){
+  var v = l.service==="learn" ? l.learnPrice : l.playPrice;
+  if(v==="" || v==null) v = l.service==="learn" ? DB.settings.rateLearn : DB.settings.ratePlay;
+  return +v||0;
+}
+function stillOwed(l){ return Math.max(0, quoteOf(l) - (+l.amountReceived||0)); }
 function leadValue(l){
   var v = l.service==="learn" ? l.learnPrice : l.playPrice;
   return (v==="" || v==null) ? 0 : +v;
@@ -1018,11 +1064,16 @@ function viewLeads(){
   var rows=leadsFiltered();
   var open  = DB.leads.filter(function(l){ return l.stage!=="Converted" && l.stage!==LEAD_LOST; });
   var value = open.reduce(function(s,l){ return s+leadValue(l); },0);
+  var collected = DB.leads.reduce(function(s,l){ return s+(+l.amountReceived||0); },0);
+  var toCollect = DB.leads.filter(function(l){ return l.stage==="Converted"; })
+                          .reduce(function(s,l){ return s+stillOwed(l); },0);
   var f=state.leadFilters;
 
   var h='<div class="page-head"><div><h2>Enquiries</h2><p>'+
     open.length+' open enquir'+(open.length===1?"y":"ies")+
     (value?' &middot; '+inr(value)+' quoted':'')+
+    (collected?' &middot; <b style="color:var(--jade)">'+inr(collected)+' collected</b>':'')+
+    (toCollect?' &middot; <b style="color:var(--gold)">'+inr(toCollect)+' to collect at the venue</b>':'')+
     ' &middot; every customer starts here</p></div>'+
     '<div class="head-actions"><div class="seg">'+
     '<button type="button" data-lm="board" class="'+(state.leadMode==="board"?"on":"")+'">Board</button>'+
@@ -1061,18 +1112,21 @@ function viewLeads(){
        '</div></div></div></details>';
   } else {
     h+='<div class="tblwrap"><table class="dt"><thead><tr>'+
-      '<th>Name</th><th>Wants</th><th>Quote</th><th>Contact</th><th>Source</th><th>Stage</th><th>Added</th>'+
+      '<th>Name</th><th>Wants</th><th>Quote</th><th>Received</th><th>To collect</th><th>Contact</th><th>Source</th><th>Stage</th>'+
       '</tr></thead><tbody>';
-    if(!rows.length) h+='<tr><td colspan="7"><div class="empty">No enquiries match those filters.</div></td></tr>';
+    if(!rows.length) h+='<tr><td colspan="8"><div class="empty">No enquiries match those filters.</div></td></tr>';
     rows.forEach(function(l){
       h+='<tr data-lead="'+l.id+'"><td><b>'+esc(l.name)+'</b>'+
         (l.customerId?'<div class="hint">now a customer</div>':'')+'</td>'+
         '<td><span class="pill '+SERVICES[l.service].cls+'">'+SERVICES[l.service].label+'</span></td>'+
         '<td class="mono">'+esc(leadQuote(l))+'</td>'+
+        '<td class="mono">'+(+l.amountReceived>0?inr(l.amountReceived):'<span style="color:var(--muted)">&mdash;</span>')+
+          (l.customerId?'<div class="hint">'+payInfoLead(l).short+'</div>':'')+'</td>'+
+        '<td class="mono"'+(l.customerId&&stillOwed(l)>0?' style="color:var(--red);font-weight:600"':'')+'>'+
+          (l.customerId?(stillOwed(l)>0?inr(stillOwed(l)):"settled"):'<span style="color:var(--muted)">&mdash;</span>')+'</td>'+
         '<td class="mono">'+esc(l.phone)+(l.email?'<div class="hint">'+esc(l.email)+'</div>':'')+'</td>'+
         '<td>'+esc(l.source||"&mdash;")+'</td>'+
-        '<td><span class="pill '+(l.stage==="Converted"?"paid":l.stage===LEAD_LOST?"unpaid":"ghost")+'">'+esc(l.stage)+'</span></td>'+
-        '<td class="mono">'+(l.createdAt?fmtShort(String(l.createdAt).slice(0,10)):"&mdash;")+'</td></tr>';
+        '<td><span class="pill '+(l.stage==="Converted"?"paid":l.stage===LEAD_LOST?"unpaid":"ghost")+'">'+esc(l.stage)+'</span></td></tr>';
     });
     h+='</tbody></table></div>';
   }
@@ -1084,7 +1138,10 @@ function leadCard(l){
     '<b>'+esc(l.name)+'</b>'+
     '<div class="meta">'+esc(l.phone||"no phone")+'</div>'+
     '<div class="tags"><span class="pill '+SERVICES[l.service].cls+'">'+SERVICES[l.service].label+'</span>'+
-    '<span class="pill ghost">'+esc(leadQuote(l))+'</span></div>'+
+    '<span class="pill ghost">'+esc(leadQuote(l))+'</span>'+
+    (+l.partySize>1?'<span class="pill ghost">'+l.partySize+'p</span>':'')+
+    (l.customerId?'<span class="pill '+payInfoLead(l).cls+'">'+payInfoLead(l).short+'</span>':'')+
+    '</div>'+
     (l.source?'<div class="hint" style="margin-top:5px">via '+esc(l.source)+'</div>':'')+
     '<select class="kmove" data-lmove="'+l.id+'">'+
       LEAD_STAGES.concat([LEAD_LOST]).map(function(x){
@@ -1128,11 +1185,7 @@ function wireLeads(){
 
 function moveLead(id, stage){
   var l=lead(id); if(!l) return;
-  if(stage==="Converted" && !l.customerId){
-    openLead(id);
-    toast("Use the Convert button so a customer record gets created.");
-    return;
-  }
+  if(stage==="Converted" && !l.customerId){ openConvert(l); return; }
   var rec={}; for(var k in l) rec[k]=l[k];
   rec.stage=stage;
   render();
@@ -1146,6 +1199,7 @@ function openLead(id, pre){
   var d = existing ? JSON.parse(JSON.stringify(existing)) : {
     id:null, name:pre.name||"", phone:pre.phone||"", email:"", source:DB.sources[0]||"Instagram",
     service:"play", playPrice:"", learnClasses:"", learnPrice:"",
+    partySize:1, paymentState:"none", amountReceived:0,
     notes:"", stage:"New", customerId:""
   };
 
@@ -1173,8 +1227,13 @@ function openLead(id, pre){
     h+='<div class="body">';
 
     if(errs.length) h+='<div class="alert bad"><b>Can’t save yet</b><br>'+errs.join("<br>")+'</div>';
-    if(converted) h+='<div class="alert" style="background:var(--jade-bg);border-color:var(--jade-line);color:var(--jade)">'+
-      '<b>Converted.</b> '+esc(cust?cust.name:"This enquirer")+' is now a customer and can be booked from the Schedule.</div>';
+    if(converted){
+      var ps=payInfoLead(d), owed=stillOwed(d);
+      h+='<div class="alert" style="background:var(--jade-bg);border-color:var(--jade-line);color:var(--jade)">'+
+        '<b>Converted.</b> '+esc(cust?cust.name:"This enquirer")+' is a customer now. '+ps.label+
+        (+d.amountReceived>0?', '+inr(d.amountReceived)+' received':'')+
+        (owed>0?'. '+inr(owed)+' still to collect.':'.')+'</div>';
+    }
 
     h+='<div class="sect"><div class="eyebrow" style="margin-bottom:9px">Who got in touch</div>'+
        '<div class="row2">'+
@@ -1194,16 +1253,26 @@ function openLead(id, pre){
        '</div>';
 
     if(d.service==="play"){
-      h+='<div class="field"><label for="lPlayPrice">Price quoted</label>'+
+      h+='<div class="row2">'+
+         '<div class="field"><label for="lParty">How many coming</label>'+
+         '<select class="inp" id="lParty">'+
+         [1,2,3,4,5,6,7,8].map(function(n){ return '<option value="'+n+'"'+(n===+d.partySize?" selected":"")+'>'+n+(n===1?" person":" people")+'</option>'; }).join("")+
+         '</select></div>'+
+         '<div class="field"><label for="lPlayPrice">Price quoted</label>'+
          '<input class="inp mono" id="lPlayPrice" type="number" min="0" step="50" value="'+(d.playPrice===""?"":d.playPrice)+'" placeholder="e.g. 1200">'+
-         '<div class="hint">Whatever you quoted them. Leave blank if you have not quoted yet.</div></div>';
+         '<div class="hint">Total for the group. Blank if not quoted yet.</div></div></div>';
     } else {
       h+='<div class="row2">'+
+         '<div class="field"><label for="lParty">How many students</label>'+
+         '<select class="inp" id="lParty">'+
+         [1,2,3,4].map(function(n){ return '<option value="'+n+'"'+(n===+d.partySize?" selected":"")+'>'+n+(n===1?" student":" students")+'</option>'; }).join("")+
+         '</select></div>'+
          '<div class="field"><label for="lClasses">Number of classes</label>'+
          '<input class="inp mono" id="lClasses" type="number" min="1" step="1" value="'+(d.learnClasses===""?"":d.learnClasses)+'" placeholder="e.g. 8"></div>'+
+         '</div><div class="row2">'+
          '<div class="field"><label for="lLearnPrice">Price quoted</label>'+
          '<input class="inp mono" id="lLearnPrice" type="number" min="0" step="100" value="'+(d.learnPrice===""?"":d.learnPrice)+'" placeholder="e.g. 14000"></div>'+
-         '</div>';
+         '<div></div></div>';
       if(d.learnClasses!=="" && +d.learnClasses>0 && d.learnPrice!=="" && +d.learnPrice>0)
         h+='<div class="hint">Works out at '+inr(Math.round(+d.learnPrice / +d.learnClasses))+' a class.</div>';
     }
@@ -1232,7 +1301,7 @@ function openLead(id, pre){
        ((errs.length||!canWrite())?' disabled style="opacity:.45;cursor:not-allowed"':'')+'>'+
        (d.id?"Save":"Save enquiry")+'</button></div></footer></div></div>';
 
-    root.innerHTML=h;
+    setHTML(root, h);
     wire();
   }
 
@@ -1241,6 +1310,7 @@ function openLead(id, pre){
     d.source=$("#lSource").value; d.stage=$("#lStage").value; d.notes=$("#lNotes").value;
     var a=$("#lPlayPrice"); if(a) d.playPrice = a.value===""?"":+a.value;
     var b=$("#lClasses");   if(b) d.learnClasses = b.value===""?"":+b.value;
+    var pz=$("#lParty");    if(pz) d.partySize = +pz.value||1;
     var c=$("#lLearnPrice");if(c) d.learnPrice = c.value===""?"":+c.value;
   }
 
@@ -1251,7 +1321,7 @@ function openLead(id, pre){
     Array.prototype.forEach.call(document.querySelectorAll("[data-lsvc]"), function(b){
       b.onclick=function(){ collect(); d.service=b.getAttribute("data-lsvc"); draw(); };
     });
-    ["lName","lPhone","lEmail","lSource","lStage","lNotes","lPlayPrice","lClasses","lLearnPrice"].forEach(function(idf){
+    ["lName","lPhone","lEmail","lSource","lStage","lNotes","lPlayPrice","lClasses","lLearnPrice","lParty"].forEach(function(idf){
       var e=$("#"+idf); if(e) e.onchange=function(){ collect(); draw(); };
     });
 
@@ -1265,16 +1335,10 @@ function openLead(id, pre){
     if(conv) conv.onclick=function(){
       collect();
       if(problems().length){ draw(); return; }
-      conv.disabled=true; conv.textContent="Converting…";
       var rec={}; for(var k in d) rec[k]=d[k];
       if(!rec.id) rec.id="ld"+uid();
-      putLead(rec)
-        .then(function(){ return convertLead(rec); })
-        .then(function(res){
-          close(); render();
-          toast(res.reused ? rec.name+" was already a customer, enquiry linked to them."
-                           : rec.name+" is now a customer.");
-        }, function(e){ conv.disabled=false; conv.textContent="Convert to customer"; fail(e); });
+      close();
+      openConvert(rec);
     };
 
     $("#lSave").onclick=function(){
@@ -1287,6 +1351,116 @@ function openLead(id, pre){
       putLead(rec).then(function(){
         render(); toast(isNew ? "Enquiry saved for "+rec.name+"." : "Enquiry updated.");
       }, fail);
+    };
+  }
+  draw();
+}
+
+/* ---- the money question, asked once, at conversion ---- */
+function openConvert(l){
+  var d={}; for(var k in l) d[k]=l[k];
+  if(["none","token","paid"].indexOf(d.paymentState)<0) d.paymentState="none";
+  if(d.paymentState==="token" && !(+d.amountReceived>0))
+    d.amountReceived = DB.settings.tokenDeposit;
+
+  var root=$("#modalRoot");
+  function close(){ root.innerHTML=""; document.removeEventListener("keydown",onKey); }
+  function onKey(e){ if(e.key==="Escape") close(); }
+  document.addEventListener("keydown",onKey);
+
+  function received(){
+    var q=quoteOf(d);
+    if(d.paymentState==="none") return 0;
+    if(d.paymentState==="paid") return q;
+    return +d.amountReceived||0;
+  }
+  function trouble(){
+    var q=quoteOf(d), got=received();
+    if(d.paymentState!=="token") return "";
+    if(got<=0) return "A token has to be more than nothing.";
+    if(got>=q) return "That is the whole quote, so mark it Paid in full instead.";
+    return "";
+  }
+
+  function draw(){
+    var q=quoteOf(d), got=received(), owed=Math.max(0,q-got), bad=trouble();
+
+    var h='<div class="scrim" id="cvscrim"><div class="modal" style="max-width:460px" role="dialog" aria-modal="true">';
+    h+='<header><h3>Convert '+esc(d.name)+'</h3><button class="x" type="button" id="cvClose" aria-label="Close">&times;</button></header>';
+    h+='<div class="body">';
+    h+='<p class="hint" style="margin-top:0">'+SERVICES[d.service].label+
+       (d.service==="learn" && d.learnClasses ? ' &middot; '+d.learnClasses+' classes' : '')+
+       ' &middot; '+d.partySize+(+d.partySize===1?' person':' people')+'</p>';
+
+    h+='<div class="eyebrow" style="margin:14px 0 9px">What has been paid</div>';
+    h+='<div class="chiprow" style="margin-bottom:12px">'+
+       '<button type="button" class="chip '+(d.paymentState==="none"?"on":"")+'" data-ps="none">Nothing yet</button>'+
+       '<button type="button" class="chip '+(d.paymentState==="token"?"on":"")+'" data-ps="token">Token taken</button>'+
+       '<button type="button" class="chip jade '+(d.paymentState==="paid"?"on":"")+'" data-ps="paid">Paid in full</button>'+
+       '</div>';
+
+    if(d.paymentState==="token"){
+      h+='<div class="field"><label for="cvAmt">Token collected</label>'+
+         '<input class="inp mono" id="cvAmt" type="number" min="1" step="10" value="'+(+d.amountReceived||0)+'">'+
+         '<div class="hint">Your standard token is '+inr(DB.settings.tokenDeposit)+'. It comes off the bill.</div></div>';
+    }
+    if(bad) h+='<div class="alert bad">'+bad+'</div>';
+
+    h+='<div class="panel" style="margin-top:6px;padding:12px 14px">'+
+       '<ul class="ul" style="font-size:13px">'+
+       '<li><span>Quoted</span><span class="mono">'+inr(q)+'</span></li>'+
+       '<li><span>Received now</span><span class="mono">'+(got?inr(got):"nothing")+'</span></li>'+
+       '<li><span><b>'+(owed>0?"To collect at the venue":"Nothing left to collect")+'</b></span>'+
+       '<span class="mono" style="font-weight:700'+(owed>0?";color:var(--red)":";color:var(--jade)")+'">'+inr(owed)+'</span></li>'+
+       '</ul></div>';
+
+    h+='<div class="hint" style="margin-top:11px">The booking form opens next with this already filled in. '+
+       'Converting never requires payment, it just records where you stand.</div>';
+    h+='</div>';
+    h+='<footer><div class="right">'+
+       '<button class="btn" type="button" id="cvCancel">Cancel</button>'+
+       '<button class="btn btn-gold" type="button" id="cvGo"'+(bad?' disabled style="opacity:.45;cursor:not-allowed"':'')+'>Convert and book</button>'+
+       '</div></footer></div></div>';
+    setHTML(root, h);
+    wire();
+  }
+
+  function wire(){
+    $("#cvscrim").onclick=function(e){ if(e.target.id==="cvscrim") close(); };
+    $("#cvClose").onclick=close; $("#cvCancel").onclick=close;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-ps]"), function(b){
+      b.onclick=function(){
+        d.paymentState=b.getAttribute("data-ps");
+        if(d.paymentState==="token" && !(+d.amountReceived>0)) d.amountReceived=DB.settings.tokenDeposit;
+        if(d.paymentState==="none") d.amountReceived=0;
+        draw();
+      };
+    });
+    var amt=$("#cvAmt");
+    if(amt) amt.onchange=function(){ d.amountReceived=+amt.value||0; draw(); };
+
+    $("#cvGo").onclick=function(){
+      if(trouble()) { draw(); return; }
+      var q=quoteOf(d), got=received();
+      d.amountReceived=got;
+      var btn=$("#cvGo"); btn.disabled=true; btn.textContent="Converting\u2026";
+      putLead(d)
+        .then(function(){ return convertLead(d); })
+        .then(function(res){
+          close(); render();
+          toast(res.reused ? d.name+" was already a customer, enquiry linked."
+                           : d.name+" is now a customer.");
+          openBooking(null, {
+            customerId: res.customerId,
+            type: d.service,
+            guests: Math.min(4, Math.max(1, +d.partySize||1)),
+            amountDue: q,
+            amountPaid: got,
+            payment: got<=0 ? "unpaid" : (got>=q ? "paid" : "partial"),
+            stage: got>0 ? "Confirmed" : "New Lead",
+            date: today()
+          });
+        }, function(e){ btn.disabled=false; btn.textContent="Convert and book"; fail(e); });
     };
   }
   draw();
@@ -1481,6 +1655,9 @@ function viewSettings(){
     '<div class="field"><label for="stLearn">To Learn length (min)</label><input class="inp mono" id="stLearn" type="number" step="30" value="'+s.defLearn+'"></div></div>'+
     '<div class="row2"><div class="field"><label for="stRp">To Play rate</label><input class="inp mono" id="stRp" type="number" step="100" value="'+s.ratePlay+'"></div>'+
     '<div class="field"><label for="stRl">To Learn rate</label><input class="inp mono" id="stRl" type="number" step="100" value="'+s.rateLearn+'"></div></div>'+
+    '<div class="row2"><div class="field"><label for="stTok">Standard token deposit</label>'+
+    '<input class="inp mono" id="stTok" type="number" step="10" min="0" value="'+(s.tokenDeposit==null?50:s.tokenDeposit)+'">'+
+    '<div class="hint">Prefilled when you convert an enquiry. Comes off their bill.</div></div><div></div></div>'+
     '<button class="btn btn-sm btn-primary" type="button" id="saveSettings" style="margin-top:6px">Save defaults</button></div>';
 
   h+=staffPanel();
@@ -1518,6 +1695,7 @@ function wireSettings(){
     DB.settings.defLearn=+$("#stLearn").value||DB.settings.defLearn;
     DB.settings.ratePlay=+$("#stRp").value||DB.settings.ratePlay;
     DB.settings.rateLearn=+$("#stRl").value||DB.settings.rateLearn;
+    var tk=$("#stTok"); if(tk && tk.value!=="") DB.settings.tokenDeposit=+tk.value;
     render();
     putConfig("settings").then(function(){ toast("Defaults saved."); }, fail);
   };
