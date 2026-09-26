@@ -241,6 +241,24 @@ function putCustomer(c){
     if(r.error) throw r.error;
   });
 }
+function delCustomer(id){
+  DB.customers = DB.customers.filter(function(c){ return c.id!==id; });
+  if(!sb) return Promise.resolve();
+  return sb.from("customers")["delete"]().eq("id",id).then(function(r){ if(r.error) throw r.error; });
+}
+/* A Converted enquiry may not point at nobody, so hand it back to Quoted
+   before the customer disappears underneath it. */
+function releaseLeadsFor(cid){
+  var linked = DB.leads.filter(function(l){ return l.customerId===cid; });
+  if(!linked.length) return Promise.resolve();
+  return Promise.all(linked.map(function(l){
+    var rec={}; for(var k in l) rec[k]=l[k];
+    rec.customerId = "";
+    if(rec.stage==="Converted") rec.stage = "Quoted";
+    return putLead(rec);
+  }));
+}
+
 function putConfig(which){
   if(!sb) return Promise.resolve();
   if(which==="teachers")
@@ -509,7 +527,8 @@ function viewSchedule(){
 }
 
 function scheduleGrid(d){
-  var sl=slots(), tbs=activeTables(), W=66, LANE=30;
+  var narrow = (typeof window!=="undefined" && window.innerWidth<861);
+  var sl=slots(), tbs=activeTables(), W=narrow?72:66, LANE=narrow?38:30;
   var h='<div class="gridwrap"><div class="grid">';
   h+='<div class="grow ghead"><div class="gcorner"><span>Table</span></div><div class="gtimes">';
   sl.forEach(function(t){ h+='<div class="gtime'+(t.slice(3)==="00"?" hr":"")+'">'+(t.slice(3)==="00"?t12(t):"")+'</div>'; });
@@ -1074,7 +1093,7 @@ function viewLeads(){
     (value?' &middot; '+inr(value)+' quoted':'')+
     (collected?' &middot; <b style="color:var(--jade)">'+inr(collected)+' collected</b>':'')+
     (toCollect?' &middot; <b style="color:var(--gold)">'+inr(toCollect)+' to collect at the venue</b>':'')+
-    ' &middot; every customer starts here</p></div>'+
+    '<span class="hide-sm"> &middot; every customer starts here</span></p></div>'+
     '<div class="head-actions"><div class="seg">'+
     '<button type="button" data-lm="board" class="'+(state.leadMode==="board"?"on":"")+'">Board</button>'+
     '<button type="button" data-lm="table" class="'+(state.leadMode==="table"?"on":"")+'">Table</button></div>'+
@@ -1496,7 +1515,9 @@ function customerDetail(cid){
   var due=bs.reduce(function(s,b){return s+Math.max(0,(+b.amountDue||0)-(+b.amountPaid||0));},0);
   var h='<div class="page-head"><div><button class="btn btn-sm" type="button" id="backCust" style="margin-bottom:7px">&#8249; All customers</button>'+
     '<h2>'+esc(c.name)+'</h2><p class="mono">'+esc(c.phone)+(c.email?" &middot; "+esc(c.email):"")+'</p></div>'+
-    '<div class="head-actions"><button class="btn btn-gold" type="button" id="bookFor">+ Book for '+esc(c.name.split(" ")[0])+'</button></div></div>';
+    '<div class="head-actions">'+
+    (perm.admin?'<button class="btn btn-danger btn-sm" type="button" id="delCust">Delete customer</button>':'')+
+    '<button class="btn btn-gold" type="button" id="bookFor">+ Book for '+esc(c.name.split(" ")[0])+'</button></div></div>';
   h+='<div class="stats">'+
     stat("Bookings",bs.length,"all time")+
     stat("Lifetime paid",inr(paid),"received")+
@@ -1532,6 +1553,7 @@ function wireCustomers(){
     r.onclick=function(){ state.customerOpen=r.getAttribute("data-cust"); render(); window.scrollTo(0,0); };
   });
   var back=$("#backCust"); if(back) back.onclick=function(){ state.customerOpen=null; render(); };
+  var dc=$("#delCust"); if(dc) dc.onclick=function(){ openDeleteCustomer(state.customerOpen); };
   var bf=$("#bookFor");
   if(bf) bf.onclick=function(){
     var c=customer(state.customerOpen);
@@ -1545,6 +1567,52 @@ function wireCustomers(){
   Array.prototype.forEach.call(m.querySelectorAll("tr[data-book]"), function(r){
     r.onclick=function(e){ e.stopPropagation(); openBooking(r.getAttribute("data-book")); };
   });
+}
+
+function openDeleteCustomer(cid){
+  var c=customer(cid);
+  var bs=DB.bookings.filter(function(b){ return b.customerId===cid; });
+  var linked=DB.leads.filter(function(l){ return l.customerId===cid; });
+  var root=$("#modalRoot");
+  function close(){ root.innerHTML=""; document.removeEventListener("keydown",onKey); }
+  function onKey(e){ if(e.key==="Escape") close(); }
+  document.addEventListener("keydown",onKey);
+
+  var blocked = bs.length>0;
+  var h='<div class="scrim" id="dcscrim"><div class="modal" style="max-width:440px" role="dialog" aria-modal="true">';
+  h+='<header><h3>'+(blocked?"Can\u2019t delete yet":"Delete "+esc(c.name)+"?")+'</h3>'+
+     '<button class="x" type="button" id="dcClose" aria-label="Close">&times;</button></header><div class="body">';
+
+  if(blocked){
+    h+='<p style="margin-top:0">'+esc(c.name)+' has <b>'+bs.length+' booking'+(bs.length===1?"":"s")+'</b> on record. '+
+       'Deleting them would leave those bookings pointing at nobody, so the database refuses it.</p>'+
+       '<p>Delete their bookings first if you really want them gone. If you just want to stop them booking, '+
+       'leave the record alone, it costs nothing and keeps your history intact.</p>';
+  } else {
+    h+='<p style="margin-top:0">This removes '+esc(c.name)+' and their contact details for good. There is no undo.</p>';
+    if(linked.length)
+      h+='<div class="alert warn">'+linked.length+' enquir'+(linked.length===1?"y":"ies")+
+         ' point'+(linked.length===1?"s":"")+' at this customer. '+(linked.length===1?"It":"They")+
+         ' will go back to <b>Quoted</b> so the enquiry history survives.</div>';
+  }
+  h+='</div><footer><div class="right">'+
+     '<button class="btn" type="button" id="dcCancel">'+(blocked?"Close":"Keep them")+'</button>'+
+     (blocked?'':'<button class="btn btn-danger" type="button" id="dcGo">Delete</button>')+
+     '</div></footer></div></div>';
+  root.innerHTML=h;
+
+  $("#dcscrim").onclick=function(e){ if(e.target.id==="dcscrim") close(); };
+  $("#dcClose").onclick=close; $("#dcCancel").onclick=close;
+  var go=$("#dcGo");
+  if(go) go.onclick=function(){
+    go.disabled=true; go.textContent="Deleting\u2026";
+    releaseLeadsFor(cid)
+      .then(function(){ return delCustomer(cid); })
+      .then(function(){
+        close(); state.customerOpen=null; render();
+        toast(c.name+" deleted.");
+      }, function(e){ go.disabled=false; go.textContent="Delete"; fail(e); });
+  };
 }
 
 /* ============ DASHBOARD ============ */

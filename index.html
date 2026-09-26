@@ -292,6 +292,64 @@ table.dt tbody tr:hover{background:var(--surface-2)}
 }
 .mobhead{display:none}
 @media (max-width:860px){ .mobhead{display:flex} }
+
+/* ---------- Phone ----------
+   Two things matter at this size: nothing needs a sideways swipe to reach,
+   and everything can be hit with a thumb. Apple's floor for a tap target is
+   44px; most of these controls were sitting at 28-33px. */
+@media (max-width:860px){
+
+  /* Boards stack instead of scrolling sideways. Dragging a card does not work
+     on touch anyway, which is what the stage dropdown on each card is for. */
+  .kan{grid-template-columns:1fr!important;gap:10px;overflow-x:visible}
+  .kcol{min-height:0}
+  .kcol h3{font-size:11.5px}
+  .kcards{gap:8px}
+  .kmove{display:block;min-height:42px;font-size:13px;padding:8px 10px}
+
+  /* Thumb-sized controls */
+  .btn{min-height:44px;padding:11px 16px;font-size:14px}
+  .btn-sm{min-height:40px;padding:9px 13px;font-size:13px}
+  .btn-block{min-height:48px}
+  .inp{min-height:44px;font-size:16px}          /* 16px also stops iOS zooming on focus */
+  textarea.inp{min-height:76px}
+  .filters .inp{min-height:42px;font-size:14px;flex:1 1 44%;min-width:0}
+  .filters{gap:8px}
+  .seg{padding:3px}
+  .seg button{min-height:40px;padding:9px 14px;font-size:13.5px}
+  .datebar{gap:9px}
+  .datebar .nav-btn{width:44px;height:44px;font-size:18px}
+  .chip{min-height:42px;padding:10px 14px;font-size:13.5px}
+  .x{min-width:44px;min-height:44px}
+  table.dt tbody tr td{padding-top:12px;padding-bottom:12px}
+
+  /* Nothing under about 11.5px */
+  .pill{font-size:11px;padding:3px 9px}
+  .hint{font-size:12px}
+  .eyebrow{font-size:11px}
+  .kcard b{font-size:14px}
+  .kcard .meta{font-size:11.5px}
+  .dayrow .bd .sub{font-size:12px}
+  .dayrow .tm{font-size:12.5px}
+  .stat .k{font-size:10.5px}
+  .stat .s{font-size:12px}
+  table.dt th{font-size:10.5px}
+  table.dt td{font-size:13.5px}
+  .legend{font-size:12px;gap:10px}
+  .auth-card .creds{font-size:12px}
+
+  /* The page subtitle can run long; let it breathe rather than crowd */
+  .page-head p{font-size:13px;line-height:1.5}
+  .hide-sm{display:none}
+}
+
+/* Coarse pointers on bigger screens (tablets at the desk) get the same
+   generous targets without the phone layout changes. */
+@media (pointer:coarse) and (min-width:861px){
+  .btn{min-height:42px}
+  .seg button{min-height:38px}
+  .kmove{display:block;min-height:40px}
+}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 
 /* ---------- Auth ---------- */
