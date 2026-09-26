@@ -21,5 +21,5 @@
 
 var CONFIG = {
   url:     "https://kutdpfpwwavfzlcttjpr.supabase.co",
-  anonKey: "sb_publishable_YhsMy-Dn18SRFOjS5s6Xkg_Ot1YdYE"
+  anonKey: "sb_publishable_YhsMy-Dn18SRFOjS5s6Xkg_Ot1YdYE9"
 };
