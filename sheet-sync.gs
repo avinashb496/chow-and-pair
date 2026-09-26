@@ -1,8 +1,8 @@
 /**
  * The Chow & Pair — Google Sheet mirror
  *
- * Copies every booking and customer out of Supabase into this
- * spreadsheet. One way only: the sheet is a readable, sortable,
+ * Copies every booking, customer and enquiry out of Supabase into
+ * this spreadsheet. One way only: the sheet is a readable, sortable,
  * downloadable copy. Editing a cell here changes nothing in the
  * booking system, and the next sync overwrites it.
  *
@@ -144,6 +144,27 @@ function syncNow() {
   });
 
   writeSheet_('Customers', custHeader, custRows);
+
+  var leads = fetchRows_('leads?select=*&order=created_at.desc');
+  var leadHeader = ['Lead ID', 'Name', 'Phone', 'Email', 'Source', 'Wants',
+                    'Classes', 'Price quoted', 'Stage', 'Became customer', 'Notes', 'Added'];
+  var leadRows = leads.map(function (l) {
+    return [
+      l.id,
+      l.name,
+      l.phone || '',
+      l.email || '',
+      l.source || '',
+      l.service === 'learn' ? 'To Learn' : 'To Play',
+      l.learn_classes == null ? '' : l.learn_classes,
+      l.service === 'learn' ? money_(l.learn_price) : money_(l.play_price),
+      l.stage,
+      l.customer_id || '',
+      l.notes || '',
+      l.created_at || ''
+    ];
+  });
+  writeSheet_('Enquiries', leadHeader, leadRows);
 
   var meta = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Bookings');
   meta.getRange(1, header.length + 2).setValue(
