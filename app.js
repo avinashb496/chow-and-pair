@@ -255,6 +255,57 @@ function slots(){
   return out;
 }
 
+/* ============ seats ============ */
+function liveOn(tableId, date){
+  return DB.bookings.filter(function(b){ return b.tableId===tableId && b.date===date && !isClosed(b); });
+}
+function seatsTaken(tableId, date, start, end, exceptId){
+  return liveOn(tableId,date).reduce(function(s,b){
+    if(exceptId && b.id===exceptId) return s;
+    return s + (overlaps(start,end,b.start,b.end) ? (+b.guests||0) : 0);
+  },0);
+}
+function capacityOf(tableId){ var t=tableOf(tableId); return t? +t.capacity : 0; }
+function slotIndex(t){ return (t2m(t)-t2m(DB.settings.open))/DB.settings.slot; }
+
+/* seats taken in each half-hour column of one table's day */
+function colSeats(tableId, date, sl){
+  var list=liveOn(tableId,date), st=DB.settings.slot;
+  return sl.map(function(t){
+    var a=t2m(t), z=a+st;
+    return list.reduce(function(s,b){
+      return s + ((t2m(b.start) < z && a < t2m(b.end)) ? (+b.guests||0) : 0);
+    },0);
+  });
+}
+
+/* runs of adjacent columns that are part full: a table needing players */
+function openRuns(tableId, date, sl){
+  var cap=capacityOf(tableId), cols=colSeats(tableId,date,sl), out=[], cur=null;
+  cols.forEach(function(taken,i){
+    var partial = taken>0 && taken<cap;
+    if(partial && cur && cur.taken===taken && cur.to===i-1){ cur.to=i; return; }
+    if(cur){ out.push(cur); cur=null; }
+    if(partial) cur={from:i,to:i,taken:taken,free:cap-taken};
+  });
+  if(cur) out.push(cur);
+  return out;
+}
+
+/* pack parties sharing a table into stacked lanes */
+function laneAssign(list){
+  var lanes=[], out=[];
+  list.slice().sort(function(a,b){ return (t2m(a.start)-t2m(b.start)) || (t2m(a.end)-t2m(b.end)); })
+    .forEach(function(b){
+      var put=-1;
+      for(var i=0;i<lanes.length;i++){ if(lanes[i] <= t2m(b.start)){ put=i; break; } }
+      if(put<0){ lanes.push(t2m(b.end)); put=lanes.length-1; }
+      else lanes[put]=t2m(b.end);
+      out.push({b:b, lane:put});
+    });
+  return { items:out, count:Math.max(1, lanes.length) };
+}
+
 /* ============ rules ============ */
 function overlaps(a1,a2,b1,b2){ return t2m(a1) < t2m(b2) && t2m(b1) < t2m(a2); }
 
@@ -268,25 +319,25 @@ function checkConflicts(draft){
 
   var others = DB.bookings.filter(function(b){ return b.id!==draft.id && b.date===draft.date && !isClosed(b); });
 
-  others.forEach(function(b){
-    if(b.tableId===draft.tableId && overlaps(draft.start,draft.end,b.start,b.end)){
-      var tb=tableOf(b.tableId);
-      errs.push("Table "+(tb?tb.num:"?")+" is already booked "+t12(b.start)+"&ndash;"+t12(b.end)+" for "+esc(customer(b.customerId).name)+".");
+  var tb=tableOf(draft.tableId);
+  if(tb){
+    var taken = seatsTaken(draft.tableId, draft.date, draft.start, draft.end, draft.id);
+    var free  = tb.capacity - taken;
+    if(+draft.guests > free){
+      errs.push(free>0
+        ? "Table "+tb.num+" has room for "+free+" more in that slot, not "+draft.guests+". "+taken+" of "+tb.capacity+" seats are already taken."
+        : "Table "+tb.num+" is full for that slot. All "+tb.capacity+" seats are taken.");
     }
-  });
+  }
 
   if(draft.teacherId){
     others.forEach(function(b){
       if(b.teacherId===draft.teacherId && b.tableId!==draft.tableId && overlaps(draft.start,draft.end,b.start,b.end)){
-        var tb=tableOf(b.tableId);
-        errs.push(esc(teacher(draft.teacherId).name)+" is already teaching on Table "+(tb?tb.num:"?")+" at "+t12(b.start)+"&ndash;"+t12(b.end)+".");
+        var ot=tableOf(b.tableId);
+        errs.push(esc(teacher(draft.teacherId).name)+" is already teaching on Table "+(ot?ot.num:"?")+" at "+t12(b.start)+"&ndash;"+t12(b.end)+". One teacher cannot cover two tables at once.");
       }
     });
   }
-
-  var tb=tableOf(draft.tableId);
-  if(tb && draft.guests > tb.capacity)
-    warns.push("Table "+tb.num+" seats "+tb.capacity+". You have "+draft.guests+" guests, so you will need a second table.");
   if(draft.date && draft.date < today())
     warns.push("This date is in the past ("+fmtDate(draft.date)+").");
   if(draft.payment==="partial" && (+draft.amountPaid<=0 || +draft.amountPaid>=+draft.amountDue))
@@ -338,12 +389,20 @@ function render(){
 function viewSchedule(){
   var d=state.date;
   var list=bookingsOn(d).filter(function(b){return !isClosed(b);}).sort(function(a,b){return t2m(a.start)-t2m(b.start);});
+  var sl0=slots(), seatsFilled=0, needing=0, seatsFree=0;
+  list.forEach(function(b){ seatsFilled += (+b.guests||0); });
+  activeTables().forEach(function(tb){
+    openRuns(tb.id,d,sl0).forEach(function(r){ needing++; seatsFree+=r.free; });
+  });
   var h='';
-  h+='<div class="page-head"><div><h2>Schedule</h2><p>'+list.length+' active booking'+(list.length===1?"":"s")+
-     ' &middot; '+activeTables().length+' tables in service</p></div>'+
+  h+='<div class="page-head"><div><h2>Schedule</h2><p>'+list.length+' booking'+(list.length===1?"":"s")+
+     ' &middot; '+seatsFilled+' seat'+(seatsFilled===1?"":"s")+' filled'+
+     (needing?' &middot; <b style="color:var(--gold)">'+needing+' table'+(needing===1?"":"s")+' needing '+seatsFree+' more player'+(seatsFree===1?"":"s")+'</b>':'')+
+     '</p></div>'+
      '<div class="head-actions">'+
      '<div class="seg"><button type="button" data-mode="grid" class="'+(state.schedMode==="grid"?"on":"")+'">Grid</button>'+
-     '<button type="button" data-mode="list" class="'+(state.schedMode==="list"?"on":"")+'">Day list</button></div>'+
+     '<button type="button" data-mode="list" class="'+(state.schedMode==="list"?"on":"")+'">Day list</button>'+
+     '<button type="button" data-mode="open" class="'+(state.schedMode==="open"?"on":"")+'">Open seats'+(needing?' <em style="font-style:normal;opacity:.7">('+needing+')</em>':'')+'</button></div>'+
      (canWrite()?'<button class="btn btn-gold" type="button" id="newBooking">+ New booking</button>':'')+'</div></div>';
 
   h+='<div class="datebar">'+
@@ -354,46 +413,99 @@ function viewSchedule(){
      '<input class="inp" id="datePick" type="date" value="'+d+'" style="width:auto;padding:6px 10px;border-radius:7px">'+
      '</div>';
 
-  h += state.schedMode==="grid" ? scheduleGrid(d) : scheduleList(d, list);
+  h += state.schedMode==="grid" ? scheduleGrid(d)
+     : state.schedMode==="open" ? scheduleOpen(d)
+     : scheduleList(d, list);
 
   h+='<div class="legend">'+
      '<span><i style="background:var(--jade-bg);border-color:var(--jade-line)"></i>To Play</span>'+
      '<span><i style="background:var(--plum-bg);border-color:var(--plum-line)"></i>To Learn</span>'+
      '<span><i style="background:var(--surface);border-color:var(--line);background-image:repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(0,0,0,.14) 3px,rgba(0,0,0,.14) 6px)"></i>Striped = payment outstanding</span>'+
-     '<span>Tap an empty cell to book it.</span></div>';
+     '<span><i style="border-color:var(--gold);border-style:dashed;background:transparent"></i>Dashed = seats still free</span>'+
+     '<span>Tap an empty cell to book it, or a dashed block to fill a table.</span></div>';
   return h;
 }
 
 function scheduleGrid(d){
-  var sl=slots(), tbs=activeTables(), W=66;
-  var list=bookingsOn(d).filter(function(b){return !isClosed(b);});
+  var sl=slots(), tbs=activeTables(), W=66, LANE=30;
   var h='<div class="gridwrap"><div class="grid">';
   h+='<div class="grow ghead"><div class="gcorner"><span>Table</span></div><div class="gtimes">';
   sl.forEach(function(t){ h+='<div class="gtime'+(t.slice(3)==="00"?" hr":"")+'">'+(t.slice(3)==="00"?t12(t):"")+'</div>'; });
   h+='</div></div>';
 
   tbs.forEach(function(tb){
-    h+='<div class="grow"><div class="glabel"><b>Table '+tb.num+'</b><small>'+tb.capacity+' seats</small></div><div class="gtrack">';
-    sl.forEach(function(t,i){
+    var packed = laneAssign(liveOn(tb.id,d));
+    var runs   = canWrite() ? openRuns(tb.id,d,sl) : [];
+    var lanes  = packed.count + (runs.length?1:0);
+    var rowH   = Math.max(58, lanes*LANE+10);
+    var tall   = (lanes===1);
+    var blockH = tall ? rowH-10 : LANE-6;
+    h+='<div class="grow" style="height:'+rowH+'px">'+
+       '<div class="glabel" style="height:'+rowH+'px"><b>Table '+tb.num+'</b>'+
+       '<small>'+tb.capacity+' seats</small></div>'+
+       '<div class="gtrack" style="height:'+rowH+'px">';
+
+    sl.forEach(function(t){
       h+='<button class="gcell" type="button" data-table="'+tb.id+'" data-start="'+t+'" aria-label="Book Table '+tb.num+' at '+t12(t)+'"></button>';
     });
-    list.filter(function(b){return b.tableId===tb.id;}).forEach(function(b){
-      var offset=(t2m(b.start)-t2m(DB.settings.open))/DB.settings.slot;
-      var span=(t2m(b.end)-t2m(b.start))/DB.settings.slot;
-      if(offset<0||span<=0) return;
+
+    packed.items.forEach(function(it){
+      var b=it.b;
+      var off=slotIndex(b.start), span=(t2m(b.end)-t2m(b.start))/DB.settings.slot;
+      if(off<0||span<=0) return;
       var c=customer(b.customerId), tch=teacher(b.teacherId);
       var unpaid = b.payment==="unpaid"||b.payment==="partial";
       var dotc = b.payment==="paid" ? "var(--jade)" : b.payment==="partial" ? "var(--amber)" : b.payment==="refunded" ? "var(--muted)" : "var(--red)";
       h+='<button class="blk '+TYPES[b.type].cls+(unpaid?" unpaid":"")+'" type="button" data-book="'+b.id+'" '+
-         'style="left:'+(offset*W+3)+'px;width:'+(span*W-6)+'px">'+
+         'style="left:'+(off*W+3)+'px;width:'+(span*W-6)+'px;top:'+(5+it.lane*LANE)+'px;height:'+blockH+'px">'+
          '<span class="dot" style="background:'+dotc+'"></span>'+
-         '<span class="bn">'+esc(c.name)+'</span>'+
-         '<span class="bm">'+t12(b.start)+' &middot; '+b.guests+'p'+(tch?" &middot; "+initials(tch.name):"")+'</span></button>';
+         '<span class="bn">'+esc(c.name)+' <span class="seatn">'+b.guests+'p</span></span>'+
+         (tall ? '<span class="bm">'+t12(b.start)+(tch?" &middot; "+initials(tch.name):"")+'</span>' : '')+
+         '</button>';
     });
+
+    runs.forEach(function(r){
+      var endT = m2t(t2m(sl[r.to])+DB.settings.slot);
+      h+='<button class="blk ghost" type="button" data-fill="'+tb.id+'" data-start="'+sl[r.from]+'" '+
+         'data-end="'+endT+'" data-free="'+r.free+'" '+
+         'title="Table '+tb.num+' has '+r.free+' seat(s) free from '+t12(sl[r.from])+' to '+t12(endT)+'" '+
+         'style="left:'+(r.from*W+3)+'px;width:'+((r.to-r.from+1)*W-6)+'px;top:'+(5+packed.count*LANE)+'px;height:'+(LANE-6)+'px">'+
+         '<span class="bn">+ '+r.free+' free</span></button>';
+    });
+
     h+='</div></div>';
   });
   h+='</div></div>';
   return h;
+}
+
+function scheduleOpen(d){
+  var sl=slots(), rows=[];
+  activeTables().forEach(function(tb){
+    openRuns(tb.id,d,sl).forEach(function(r){
+      rows.push({ tb:tb, start:sl[r.from], end:m2t(t2m(sl[r.to])+DB.settings.slot), taken:r.taken, free:r.free });
+    });
+  });
+  rows.sort(function(a,b){ return (t2m(a.start)-t2m(b.start)) || (a.tb.num-b.tb.num); });
+  if(!rows.length)
+    return '<div class="card empty">Nothing part full on '+fmtDate(d)+'. Every table is either empty or has a full four.</div>';
+  var h='<div class="daylist">';
+  rows.forEach(function(r){
+    var pct=Math.round(r.taken/r.tb.capacity*100);
+    var who=liveOn(r.tb.id,d).filter(function(b){ return overlaps(r.start,r.end,b.start,b.end); })
+      .map(function(b){ return esc(customer(b.customerId).name)+" ("+b.guests+")"; }).join(", ");
+    h+='<button class="dayrow" type="button" data-fill="'+r.tb.id+'" data-start="'+r.start+'" data-end="'+r.end+'" data-free="'+r.free+'">'+
+       '<div class="stripe" style="background:var(--gold)"></div>'+
+       '<div class="tm">'+t12(r.start)+'<small>'+t12(r.end)+'</small></div>'+
+       '<div class="bd"><b>Table '+r.tb.num+'</b>'+
+       '<div class="sub">'+r.taken+' of '+r.tb.capacity+' seats'+
+       '<span class="seatbar"><span style="width:'+pct+'%"></span></span></div>'+
+       (who?'<div class="sub" style="margin-top:2px">'+who+'</div>':'')+
+       '</div>'+
+       '<div class="rt"><span class="pill seatpill">'+r.free+' seat'+(r.free===1?"":"s")+' free</span>'+
+       (canWrite()?'<span class="hint">tap to fill</span>':'')+'</div></button>';
+  });
+  return h+'</div>';
 }
 
 function scheduleList(d, list){
@@ -406,7 +518,8 @@ function scheduleList(d, list){
        '<div class="tm">'+t12(b.start)+'<small>'+t12(b.end)+'</small></div>'+
        '<div class="bd"><b>'+esc(c.name)+'</b>'+
        '<div class="sub">Table '+(tb?tb.num:"?")+' &middot; '+b.guests+' guest'+(b.guests===1?"":"s")+
-       (tch?" &middot; "+esc(tch.name):"")+'</div></div>'+
+       (tch?" &middot; "+esc(tch.name):"")+
+       (tb?' &middot; slot '+seatsTaken(b.tableId,b.date,b.start,b.end)+'/'+tb.capacity:'')+'</div></div>'+
        '<div class="rt"><span class="pill '+TYPES[b.type].cls+'">'+TYPES[b.type].label+'</span>'+
        '<span class="pill '+p.cls+'">'+p.short+'</span></div></button>';
   });
@@ -428,6 +541,15 @@ function wireSchedule(){
     c.onclick=function(){ if(!canWrite()){ toast("You have view-only access."); return; }
       openBooking(null,{date:state.date, tableId:c.getAttribute("data-table"), start:c.getAttribute("data-start")}); };
   });
+  Array.prototype.forEach.call(m.querySelectorAll("[data-fill]"), function(g){
+    g.onclick=function(e){
+      e.stopPropagation();
+      if(!canWrite()){ toast("You have view-only access."); return; }
+      openBooking(null,{ date:state.date, tableId:g.getAttribute("data-fill"),
+        start:g.getAttribute("data-start"), end:g.getAttribute("data-end"),
+        guests:+g.getAttribute("data-free") });
+    };
+  });
   Array.prototype.forEach.call(m.querySelectorAll("[data-book]"), function(b){
     b.onclick=function(){ openBooking(b.getAttribute("data-book")); };
   });
@@ -448,8 +570,8 @@ function openBooking(id, pre){
       amountDue:existing.amountDue, amountPaid:existing.amountPaid, stage:existing.stage, notes:existing.notes||""
     } : {
       id:null, customerId:"", customerName:"", phone:"", email:"", source:"Instagram", custNotes:"",
-      type:typeDefault, guests:4, date:pre.date||today(), start:startDefault,
-      end:m2t(t2m(startDefault)+DB.settings.defPlay),
+      type:typeDefault, guests:pre.guests||4, date:pre.date||today(), start:startDefault,
+      end:pre.end || m2t(t2m(startDefault)+DB.settings.defPlay),
       tableId: pre.tableId || (activeTables()[0]||{}).id, teacherId:"", payment:"unpaid",
       amountDue:DB.settings.ratePlay, amountPaid:0, stage:"New Lead", notes:""
     };
@@ -496,10 +618,17 @@ function openBooking(id, pre){
        '<div class="field"><label for="fStart">Start</label><input class="inp" id="fStart" type="time" step="1800" value="'+d.start+'"></div>'+
        '<div class="field"><label for="fEnd">End</label><input class="inp" id="fEnd" type="time" step="1800" value="'+d.end+'">'+
        '<div class="hint">'+((t2m(d.end)-t2m(d.start))>0?(t2m(d.end)-t2m(d.start))+" min":"&nbsp;")+'</div></div></div>';
+    var tbNow  = tableOf(d.tableId);
+    var takenNow = tbNow ? seatsTaken(d.tableId, d.date, d.start, d.end, d.id) : 0;
+    var freeNow  = tbNow ? tbNow.capacity - takenNow : 0;
     h+='<div class="row3">'+
        '<div class="field"><label for="fTable">Table</label><select class="inp" id="fTable">'+
        tbs.map(function(t){return '<option value="'+t.id+'"'+(t.id===d.tableId?" selected":"")+'>Table '+t.num+' ('+t.capacity+' seats)</option>';}).join("")+
-       '</select></div>'+
+       '</select>'+
+       (tbNow ? '<div class="hint"'+(freeNow<=0?' style="color:var(--red)"':(takenNow?' style="color:var(--gold)"':''))+'>'+
+          (takenNow ? takenNow+' of '+tbNow.capacity+' seats taken in this slot, room for '+freeNow
+                    : 'Empty for this slot, all '+tbNow.capacity+' seats free')+'</div>' : '')+
+       '</div>'+
        '<div class="field"><label for="fGuests">Guests</label><select class="inp" id="fGuests">'+
        [1,2,3,4,5,6,7,8].map(function(n){return '<option value="'+n+'"'+(n===+d.guests?" selected":"")+'>'+n+'</option>';}).join("")+
        '</select></div>'+
@@ -890,10 +1019,16 @@ function viewDashboard(){
   var play=next7.filter(function(b){return b.type==="play";}).length;
   var learn=next7.length-play;
   var newLeads=DB.bookings.filter(function(b){return b.stage==="New Lead";}).length;
+  var sl2=slots(), freeSeats=0, partTables=0;
+  activeTables().forEach(function(tb){
+    openRuns(tb.id,td,sl2).forEach(function(r){ partTables++; freeSeats+=r.free; });
+  });
+  var seatsToday=tdB.reduce(function(s2,b){ return s2+(+b.guests||0); },0);
 
   var h='<div class="page-head"><div><h2>Dashboard</h2><p>'+fmtDate(td)+' &middot; '+dayName(td)+'</p></div></div>';
   h+='<div class="stats">'+
-    stat("Today","<span class=\"mono\">"+tdB.length+"</span>","bookings on the floor")+
+    stat("Today","<span class=\"mono\">"+tdB.length+"</span>",seatsToday+" seat"+(seatsToday===1?"":"s")+" across "+tdB.length+" booking"+(tdB.length===1?"":"s"))+
+    stat("Seats to fill","<span class=\"mono\">"+freeSeats+"</span>",partTables+" part-full table"+(partTables===1?"":"s")+" today")+
     stat("In play now","<span class=\"mono\">"+occupied+"/"+activeTables().length+"</span>","tables occupied")+
     stat("Collected today",inr(revToday),"of "+inr(expToday)+" expected")+
     stat("Outstanding",inr(outstanding),newLeads+" new lead"+(newLeads===1?"":"s")+" unconverted", outstanding>0)+
