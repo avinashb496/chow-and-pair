@@ -13,16 +13,21 @@ var PAY = [
   {v:"refunded", label:"Refunded", short:"Refunded", cls:"refund"}
 ];
 var STAGES = ["New Lead","Confirmed","Paid","Checked-In","Completed"];
+var LEAD_STAGES = ["New","Contacted","Quoted","Converted"];
+var LEAD_LOST = "Lost";
+var SERVICES = { play:{label:"To Play", cls:"play"}, learn:{label:"To Learn", cls:"learn"} };
 var CLOSED = ["Cancelled","No-Show"];
 var ICON = {
   cal:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   kan:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="5" height="16" rx="1.5"/><rect x="10" y="4" width="5" height="11" rx="1.5"/><rect x="17" y="4" width="4" height="7" rx="1.5"/></svg>',
   ppl:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5.5 6-5.5s6 2.2 6 5.5"/><path d="M16 5.5a3 3 0 010 5.6M17.5 14.6c2 .7 3.5 2.6 3.5 5.4"/></svg>',
   dash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg>',
+  lead:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13h4l2 3h6l2-3h4"/><path d="M5 5h14l2 8v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4z"/></svg>',
   cog:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v2.6M12 18.8v2.6M21.4 12h-2.6M5.2 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2L5.4 5.4"/></svg>'
 };
 var NAV = [
   {id:"schedule", label:"Schedule", icon:"cal"},
+  {id:"leads", label:"Leads", icon:"lead"},
   {id:"pipeline", label:"Pipeline", icon:"kan"},
   {id:"customers", label:"Customers", icon:"ppl"},
   {id:"dashboard", label:"Dashboard", icon:"dash"},
@@ -87,6 +92,26 @@ function bookOut(b){
 }
 function custIn(r){ return { id:r.id, name:r.name, phone:r.phone||"", email:r.email||"",
                              source:r.source||"Walk-in", notes:r.notes||"" }; }
+function leadIn(r){
+  return { id:r.id, name:r.name, phone:r.phone||"", email:r.email||"", source:r.source||"Instagram",
+    service:r.service,
+    playPrice:    r.play_price    == null ? "" : +r.play_price,
+    learnClasses: r.learn_classes == null ? "" : +r.learn_classes,
+    learnPrice:   r.learn_price   == null ? "" : +r.learn_price,
+    notes:r.notes||"", stage:r.stage, customerId:r.customer_id||"",
+    createdBy:r.created_by||"", createdAt:r.created_at||"" };
+}
+function leadOut(l){
+  var learn = l.service==="learn";
+  return { id:l.id, name:l.name, phone:l.phone||"", email:l.email||"", source:l.source||"Instagram",
+    service:l.service,
+    play_price:    (!learn && l.playPrice   !== "" && l.playPrice   != null) ? +l.playPrice   : null,
+    learn_classes: ( learn && l.learnClasses!== "" && l.learnClasses!= null) ? +l.learnClasses: null,
+    learn_price:   ( learn && l.learnPrice  !== "" && l.learnPrice  != null) ? +l.learnPrice  : null,
+    notes:l.notes||"", stage:l.stage, customer_id:l.customerId||null,
+    created_by:l.createdBy||perm.name||"" };
+}
+function digitsOf(v){ return String(v||"").replace(/\D/g,""); }
 function custOut(c){ return { id:c.id, name:c.name, phone:c.phone||"", email:c.email||"",
                               source:c.source||"Walk-in", notes:c.notes||"" }; }
 
@@ -121,7 +146,8 @@ function loadAll(){
     sb.from("teachers").select("*"),
     sb.from("tables").select("*"),
     sb.from("settings").select("*").eq("id",1).maybeSingle(),
-    sb.from("staff").select("*")
+    sb.from("staff").select("*"),
+    sb.from("leads").select("*")
   ]).then(function(r){
     for(var i=0;i<5;i++) if(r[i].error) throw r[i].error;
     DB.bookings  = (r[0].data||[]).map(bookIn);
@@ -138,6 +164,8 @@ function loadAll(){
       DB.sources = s.sources && s.sources.length ? s.sources : DB.sources;
     }
     DB.staff = (r[5] && !r[5].error && r[5].data) ? r[5].data : [];
+    if(r[6] && r[6].error) throw r[6].error;
+    DB.leads = ((r[6] && r[6].data) || []).map(leadIn);
   });
 }
 
@@ -145,7 +173,7 @@ var liveChannel=null;
 function subscribeLive(){
   if(!sb || liveChannel) return;
   liveChannel = sb.channel("chow-pair-live");
-  ["bookings","customers","teachers","tables","settings","staff"].forEach(function(t){
+  ["bookings","customers","teachers","tables","settings","staff","leads"].forEach(function(t){
     liveChannel.on("postgres_changes", {event:"*", schema:"public", table:t}, function(){
       if(liveChannel._t) clearTimeout(liveChannel._t);
       liveChannel._t = setTimeout(function(){
@@ -209,6 +237,33 @@ function putConfig(which){
     rate_play:s.ratePlay, rate_learn:s.rateLearn, sources:DB.sources
   }).eq("id",1).then(function(r){ if(r.error) throw r.error; });
 }
+function putLead(rec){
+  var i=-1; DB.leads.forEach(function(l,ix){ if(l.id===rec.id) i=ix; });
+  if(i>=0) DB.leads[i]=rec; else DB.leads.push(rec);
+  if(!sb) return Promise.resolve();
+  return sb.from("leads").upsert(leadOut(rec)).then(function(r){ if(r.error) throw r.error; });
+}
+function delLead(id){
+  DB.leads = DB.leads.filter(function(l){ return l.id!==id; });
+  if(!sb) return Promise.resolve();
+  return sb.from("leads")["delete"]().eq("id",id).then(function(r){ if(r.error) throw r.error; });
+}
+
+/* Turning an enquiry into a customer. Reuses an existing customer when the
+   phone number already exists, so a repeat enquirer does not get duplicated. */
+function convertLead(l){
+  var want = digitsOf(l.phone);
+  var match = want ? DB.customers.filter(function(c){ return digitsOf(c.phone)===want; })[0] : null;
+  var cid  = match ? match.id : ("c"+uid());
+  var cust = { id:cid, name:l.name.trim(), phone:l.phone.trim(), email:l.email.trim(),
+               source:l.source||"Instagram", notes: match ? (match.notes||"") : (l.notes||"") };
+  var done = {}; for(var k in l) done[k]=l[k];
+  done.stage="Converted"; done.customerId=cid;
+  return putCustomer(cust)
+    .then(function(){ return putLead(done); })
+    .then(function(){ return { customerId:cid, reused:!!match }; });
+}
+
 function putStaff(id, patch){
   var row=null; DB.staff.forEach(function(s){ if(s.id===id) row=s; });
   if(row) for(var k in patch) row[k]=patch[k];
@@ -228,7 +283,7 @@ function paintWho(){
 function banner(){ return ""; }
 
 var DB = {
-  teachers:[], tables:[], customers:[], bookings:[], staff:[],
+  teachers:[], tables:[], customers:[], bookings:[], staff:[], leads:[],
   sources:["Instagram","Walk-in","Referral","WhatsApp","Google","Event","Other"],
   settings:{ open:"10:00", close:"22:00", slot:30, defPlay:120, defLearn:90, ratePlay:2400, rateLearn:3200 }
 };
@@ -238,6 +293,7 @@ var state = {
   schedMode: (window.innerWidth<860 ? "list" : "grid"),
   pipeMode:"board",
   filters:{ type:"", pay:"", stage:"", teacher:"", from:"", to:"" },
+  leadMode:"board", leadFilters:{ service:"", stage:"", source:"" },
   customerOpen:null
 };
 
@@ -311,7 +367,8 @@ function overlaps(a1,a2,b1,b2){ return t2m(a1) < t2m(b2) && t2m(b1) < t2m(a2); }
 
 function checkConflicts(draft){
   var errs=[], warns=[];
-  if(!draft.customerName || !draft.customerName.trim()) errs.push("Customer name is required.");
+  if(!draft.customerId)
+    errs.push("Pick an existing customer from the list. Anyone new is added under <b>Enquiries</b> first, then converted.");
   if(!draft.phone || !draft.phone.trim()) errs.push("Phone number is required.");
   if(!draft.date) errs.push("Pick a date.");
   if(t2m(draft.end) <= t2m(draft.start)) errs.push("End time must be after the start time.");
@@ -375,11 +432,13 @@ function render(){
   paintWho();
   var top = mobHead()+banner();
   if(state.view==="schedule") m.innerHTML = top+viewSchedule();
+  else if(state.view==="leads") m.innerHTML = top+viewLeads();
   else if(state.view==="pipeline") m.innerHTML = top+viewPipeline();
   else if(state.view==="customers") m.innerHTML = top+viewCustomers();
   else if(state.view==="dashboard") m.innerHTML = top+viewDashboard();
   else m.innerHTML = top+viewSettings();
   if(state.view==="schedule") wireSchedule();
+  else if(state.view==="leads") wireLeads();
   else if(state.view==="pipeline") wirePipeline();
   else if(state.view==="customers") wireCustomers();
   else if(state.view==="settings") wireSettings();
@@ -596,8 +655,11 @@ function openBooking(id, pre){
 
     /* customer */
     h+='<div class="sect"><div class="eyebrow" style="margin-bottom:9px">Customer</div>';
-    h+='<div class="row2"><div class="field"><label for="fName">Full name</label>'+
-       '<input class="inp" id="fName" value="'+esc(d.customerName)+'" placeholder="Start typing to find a regular" autocomplete="off"></div>'+
+    h+='<div class="row2"><div class="field"><label for="fName">Customer</label>'+
+       '<input class="inp" id="fName" value="'+esc(d.customerName)+'" placeholder="Search by name or phone" autocomplete="off">'+
+       (d.customerId?'<div class="hint" style="color:var(--jade)">Customer selected</div>'
+                    :'<div class="hint">Existing customers only. New people start as an enquiry.</div>')+
+       '</div>'+
        '<div class="field"><label for="fPhone">Phone number</label><input class="inp" id="fPhone" value="'+esc(d.phone)+'" placeholder="+91 98XXX XXXXX"></div></div>';
     h+='<div id="suggBox"></div>';
     h+='<div class="row2"><div class="field"><label for="fEmail">Email <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>'+
@@ -728,7 +790,20 @@ function openBooking(id, pre){
       var hits=DB.customers.filter(function(c){
         return c.name.toLowerCase().indexOf(q)>=0 || String(c.phone).replace(/\s/g,"").indexOf(q.replace(/\s/g,""))>=0;
       }).slice(0,6);
-      if(!hits.length){ box.innerHTML='<div class="hint">No match. This will be saved as a new customer.</div>'; return; }
+      if(!hits.length){
+        box.innerHTML='<div class="alert warn" style="margin:6px 0 0">No customer called that. '+
+          'New people go through <b>Enquiries</b> first so their source and quote get recorded.'+
+          (canWrite()?'<br><button class="btn btn-sm" type="button" id="toLead" style="margin-top:7px">Create an enquiry for &ldquo;'+esc(nameI.value.trim())+'&rdquo;</button>':'')+
+          '</div>';
+        var tl=$("#toLead");
+        if(tl) tl.onclick=function(){
+          var nm=nameI.value.trim(), ph=$("#fPhone").value.trim();
+          close();
+          go("leads");
+          setTimeout(function(){ openLead(null,{name:nm, phone:ph}); }, 60);
+        };
+        return;
+      }
       box.innerHTML='<div class="sugg">'+hits.map(function(c){
         return '<button type="button" data-cid="'+c.id+'"><span class="nm">'+esc(c.name)+'</span> '+
                '<span class="ph">'+esc(c.phone)+'</span></button>';
@@ -755,22 +830,13 @@ function openBooking(id, pre){
       collect();
       var chk=checkConflicts(d);
       if(chk.errors.length || (chk.warnings.length && !override)){ draw(); return; }
-      /* customer upsert */
+      /* customers are created under Enquiries, never here. This only
+         keeps the chosen customer's contact details up to date. */
       var cid=d.customerId;
-      if(!cid){
-        var match=DB.customers.filter(function(c){ return String(c.phone).replace(/\D/g,"")===String(d.phone).replace(/\D/g,""); })[0];
-        if(match) cid=match.id;
-      }
-      var cust;
-      if(cid){
-        var cu=customer(cid);
-        cust={ id:cid, name:d.customerName.trim(), phone:d.phone.trim(), email:d.email.trim(),
-               source:d.source, notes:cu.notes||"" };
-      } else {
-        cid="c"+uid();
-        cust={ id:cid, name:d.customerName.trim(), phone:d.phone.trim(), email:d.email.trim(),
-               source:d.source, notes:"" };
-      }
+      if(!cid){ draw(); return; }
+      var cu=customer(cid);
+      var cust={ id:cid, name:d.customerName.trim(), phone:d.phone.trim(), email:d.email.trim(),
+                 source:d.source, notes:cu.notes||"" };
       if(d.payment==="paid" && (d.stage==="New Lead"||d.stage==="Confirmed")) d.stage="Paid";
       var rec={ id:d.id||("b"+uid()), customerId:cid, type:d.type, guests:+d.guests, date:d.date,
         start:d.start, end:d.end, tableId:d.tableId, teacherId:d.type==="learn"?d.teacherId:"",
@@ -921,6 +987,311 @@ function moveStage(bid, stage){
   render();
 }
 
+/* ============ LEADS / ENQUIRIES ============ */
+function lead(id){ return DB.leads.filter(function(l){ return l.id===id; })[0] || null; }
+
+function leadQuote(l){
+  if(l.service==="learn"){
+    var parts=[];
+    if(l.learnClasses!=="" && l.learnClasses!=null) parts.push(l.learnClasses+" class"+(+l.learnClasses===1?"":"es"));
+    if(l.learnPrice!=="" && l.learnPrice!=null) parts.push(inr(l.learnPrice));
+    return parts.length ? parts.join(" · ") : "Not quoted yet";
+  }
+  return (l.playPrice!=="" && l.playPrice!=null) ? inr(l.playPrice) : "Not quoted yet";
+}
+function leadValue(l){
+  var v = l.service==="learn" ? l.learnPrice : l.playPrice;
+  return (v==="" || v==null) ? 0 : +v;
+}
+
+function leadsFiltered(){
+  var f=state.leadFilters;
+  return DB.leads.filter(function(l){
+    if(f.service && l.service!==f.service) return false;
+    if(f.stage   && l.stage!==f.stage) return false;
+    if(f.source  && l.source!==f.source) return false;
+    return true;
+  }).sort(function(a,b){ return (b.createdAt||"") < (a.createdAt||"") ? -1 : 1; });
+}
+
+function viewLeads(){
+  var rows=leadsFiltered();
+  var open  = DB.leads.filter(function(l){ return l.stage!=="Converted" && l.stage!==LEAD_LOST; });
+  var value = open.reduce(function(s,l){ return s+leadValue(l); },0);
+  var f=state.leadFilters;
+
+  var h='<div class="page-head"><div><h2>Enquiries</h2><p>'+
+    open.length+' open enquir'+(open.length===1?"y":"ies")+
+    (value?' &middot; '+inr(value)+' quoted':'')+
+    ' &middot; every customer starts here</p></div>'+
+    '<div class="head-actions"><div class="seg">'+
+    '<button type="button" data-lm="board" class="'+(state.leadMode==="board"?"on":"")+'">Board</button>'+
+    '<button type="button" data-lm="table" class="'+(state.leadMode==="table"?"on":"")+'">Table</button></div>'+
+    (canWrite()?'<button class="btn btn-gold" type="button" id="newLead">+ New enquiry</button>':'')+
+    '</div></div>';
+
+  h+='<div class="filters">'+
+    '<select class="inp" id="lfService"><option value="">Both services</option>'+
+      '<option value="play"'+(f.service==="play"?" selected":"")+'>To Play</option>'+
+      '<option value="learn"'+(f.service==="learn"?" selected":"")+'>To Learn</option></select>'+
+    '<select class="inp" id="lfStage"><option value="">All stages</option>'+
+      LEAD_STAGES.concat([LEAD_LOST]).map(function(x){
+        return '<option'+(f.stage===x?" selected":"")+'>'+x+'</option>'; }).join("")+'</select>'+
+    '<select class="inp" id="lfSource"><option value="">All sources</option>'+
+      DB.sources.map(function(x){ return '<option'+(f.source===x?" selected":"")+'>'+esc(x)+'</option>'; }).join("")+
+      '</select>'+
+    '<button class="btn btn-sm" type="button" id="lfClear">Clear</button></div>';
+
+  if(state.leadMode==="board"){
+    h+='<div class="kan" style="grid-template-columns:repeat(4,minmax(216px,1fr))">';
+    LEAD_STAGES.forEach(function(st){
+      var items=rows.filter(function(l){ return l.stage===st; });
+      h+='<div class="kcol" data-lstage="'+esc(st)+'"><h3>'+st+'<em>'+items.length+'</em></h3><div class="kcards">';
+      items.forEach(function(l){ h+=leadCard(l); });
+      if(!items.length) h+='<div class="hint" style="padding:7px 2px">Nothing here.</div>';
+      h+='</div></div>';
+    });
+    h+='</div>';
+    var lost=rows.filter(function(l){ return l.stage===LEAD_LOST; });
+    h+='<details style="margin-top:14px"><summary style="cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600">'+
+       'Lost enquiries ('+lost.length+')</summary>'+
+       '<div class="kan" style="margin-top:9px;grid-template-columns:repeat(2,minmax(216px,1fr))">'+
+       '<div class="kcol" data-lstage="'+LEAD_LOST+'"><h3>'+LEAD_LOST+'<em>'+lost.length+'</em></h3><div class="kcards">'+
+       (lost.length?lost.map(leadCard).join(""):'<div class="hint" style="padding:7px 2px">Nothing here.</div>')+
+       '</div></div></div></details>';
+  } else {
+    h+='<div class="tblwrap"><table class="dt"><thead><tr>'+
+      '<th>Name</th><th>Wants</th><th>Quote</th><th>Contact</th><th>Source</th><th>Stage</th><th>Added</th>'+
+      '</tr></thead><tbody>';
+    if(!rows.length) h+='<tr><td colspan="7"><div class="empty">No enquiries match those filters.</div></td></tr>';
+    rows.forEach(function(l){
+      h+='<tr data-lead="'+l.id+'"><td><b>'+esc(l.name)+'</b>'+
+        (l.customerId?'<div class="hint">now a customer</div>':'')+'</td>'+
+        '<td><span class="pill '+SERVICES[l.service].cls+'">'+SERVICES[l.service].label+'</span></td>'+
+        '<td class="mono">'+esc(leadQuote(l))+'</td>'+
+        '<td class="mono">'+esc(l.phone)+(l.email?'<div class="hint">'+esc(l.email)+'</div>':'')+'</td>'+
+        '<td>'+esc(l.source||"&mdash;")+'</td>'+
+        '<td><span class="pill '+(l.stage==="Converted"?"paid":l.stage===LEAD_LOST?"unpaid":"ghost")+'">'+esc(l.stage)+'</span></td>'+
+        '<td class="mono">'+(l.createdAt?fmtShort(String(l.createdAt).slice(0,10)):"&mdash;")+'</td></tr>';
+    });
+    h+='</tbody></table></div>';
+  }
+  return h;
+}
+
+function leadCard(l){
+  return '<div class="kcard" draggable="true" data-lkid="'+l.id+'">'+
+    '<b>'+esc(l.name)+'</b>'+
+    '<div class="meta">'+esc(l.phone||"no phone")+'</div>'+
+    '<div class="tags"><span class="pill '+SERVICES[l.service].cls+'">'+SERVICES[l.service].label+'</span>'+
+    '<span class="pill ghost">'+esc(leadQuote(l))+'</span></div>'+
+    (l.source?'<div class="hint" style="margin-top:5px">via '+esc(l.source)+'</div>':'')+
+    '<select class="kmove" data-lmove="'+l.id+'">'+
+      LEAD_STAGES.concat([LEAD_LOST]).map(function(x){
+        return '<option'+(x===l.stage?" selected":"")+(x==="Converted"&&!l.customerId?" disabled":"")+'>'+x+'</option>';
+      }).join("")+
+    '</select></div>';
+}
+
+function wireLeads(){
+  var m=$("#main");
+  Array.prototype.forEach.call(m.querySelectorAll("[data-lm]"), function(b){
+    b.onclick=function(){ state.leadMode=b.getAttribute("data-lm"); render(); };
+  });
+  var nl=$("#newLead"); if(nl) nl.onclick=function(){ openLead(null); };
+  function setF(id,key){ var e=$("#"+id); if(e) e.onchange=function(){ state.leadFilters[key]=e.value; render(); }; }
+  setF("lfService","service"); setF("lfStage","stage"); setF("lfSource","source");
+  $("#lfClear").onclick=function(){ state.leadFilters={service:"",stage:"",source:""}; render(); };
+
+  Array.prototype.forEach.call(m.querySelectorAll("tr[data-lead]"), function(r){
+    r.onclick=function(){ openLead(r.getAttribute("data-lead")); };
+  });
+  Array.prototype.forEach.call(m.querySelectorAll("[data-lmove]"), function(sel){
+    sel.onclick=function(e){ e.stopPropagation(); };
+    sel.onchange=function(e){ e.stopPropagation(); moveLead(sel.getAttribute("data-lmove"), sel.value); };
+  });
+  Array.prototype.forEach.call(m.querySelectorAll(".kcard[data-lkid]"), function(card){
+    card.onclick=function(e){ if(e.target.tagName==="SELECT"||e.target.tagName==="OPTION") return;
+      openLead(card.getAttribute("data-lkid")); };
+    card.ondragstart=function(e){ e.dataTransfer.setData("text/plain", card.getAttribute("data-lkid")); card.classList.add("drag"); };
+    card.ondragend=function(){ card.classList.remove("drag"); };
+  });
+  Array.prototype.forEach.call(m.querySelectorAll("[data-lstage]"), function(col){
+    col.ondragover=function(e){ e.preventDefault(); col.classList.add("over"); };
+    col.ondragleave=function(){ col.classList.remove("over"); };
+    col.ondrop=function(e){
+      e.preventDefault(); col.classList.remove("over");
+      moveLead(e.dataTransfer.getData("text/plain"), col.getAttribute("data-lstage"));
+    };
+  });
+}
+
+function moveLead(id, stage){
+  var l=lead(id); if(!l) return;
+  if(stage==="Converted" && !l.customerId){
+    openLead(id);
+    toast("Use the Convert button so a customer record gets created.");
+    return;
+  }
+  var rec={}; for(var k in l) rec[k]=l[k];
+  rec.stage=stage;
+  render();
+  putLead(rec).then(function(){ render(); toast(l.name+" moved to "+stage+"."); }, fail);
+}
+
+/* ---- enquiry form ---- */
+function openLead(id, pre){
+  pre = pre || {};
+  var existing = id ? lead(id) : null;
+  var d = existing ? JSON.parse(JSON.stringify(existing)) : {
+    id:null, name:pre.name||"", phone:pre.phone||"", email:"", source:DB.sources[0]||"Instagram",
+    service:"play", playPrice:"", learnClasses:"", learnPrice:"",
+    notes:"", stage:"New", customerId:""
+  };
+
+  var root=$("#modalRoot");
+  function close(){ root.innerHTML=""; document.removeEventListener("keydown",onKey); }
+  function onKey(e){ if(e.key==="Escape") close(); }
+  document.addEventListener("keydown",onKey);
+
+  function problems(){
+    var e=[];
+    if(!d.name.trim()) e.push("Enquirer's name is required.");
+    if(!d.phone.trim()) e.push("A phone number is required, it's how you'll follow up.");
+    if(d.service==="learn" && d.learnClasses!=="" && +d.learnClasses<=0) e.push("Number of classes has to be more than zero.");
+    return e;
+  }
+
+  function draw(){
+    var errs=problems();
+    var converted = !!d.customerId;
+    var cust = converted ? customer(d.customerId) : null;
+
+    var h='<div class="scrim" id="lscrim"><div class="modal" role="dialog" aria-modal="true">';
+    h+='<header><h3>'+(d.id?"Enquiry":"New enquiry")+'</h3>'+
+       '<button class="x" type="button" id="lClose" aria-label="Close">&times;</button></header>';
+    h+='<div class="body">';
+
+    if(errs.length) h+='<div class="alert bad"><b>Can’t save yet</b><br>'+errs.join("<br>")+'</div>';
+    if(converted) h+='<div class="alert" style="background:var(--jade-bg);border-color:var(--jade-line);color:var(--jade)">'+
+      '<b>Converted.</b> '+esc(cust?cust.name:"This enquirer")+' is now a customer and can be booked from the Schedule.</div>';
+
+    h+='<div class="sect"><div class="eyebrow" style="margin-bottom:9px">Who got in touch</div>'+
+       '<div class="row2">'+
+       '<div class="field"><label for="lName">Full name</label><input class="inp" id="lName" value="'+esc(d.name)+'"></div>'+
+       '<div class="field"><label for="lPhone">Phone number</label><input class="inp" id="lPhone" value="'+esc(d.phone)+'" placeholder="+91 98XXX XXXXX"></div>'+
+       '</div><div class="row2">'+
+       '<div class="field"><label for="lEmail">Email <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>'+
+       '<input class="inp" id="lEmail" type="email" value="'+esc(d.email)+'"></div>'+
+       '<div class="field"><label for="lSource">How did they find you</label><select class="inp" id="lSource">'+
+       DB.sources.map(function(x){ return '<option'+(x===d.source?" selected":"")+'>'+esc(x)+'</option>'; }).join("")+
+       '</select></div></div></div>';
+
+    h+='<div class="sect"><div class="eyebrow" style="margin-bottom:9px">What they want</div>'+
+       '<div class="chiprow" style="margin-bottom:11px">'+
+       '<button type="button" class="chip jade '+(d.service==="play"?"on":"")+'" data-lsvc="play">To Play &middot; Studio</button>'+
+       '<button type="button" class="chip plum '+(d.service==="learn"?"on":"")+'" data-lsvc="learn">To Learn &middot; Academy</button>'+
+       '</div>';
+
+    if(d.service==="play"){
+      h+='<div class="field"><label for="lPlayPrice">Price quoted</label>'+
+         '<input class="inp mono" id="lPlayPrice" type="number" min="0" step="50" value="'+(d.playPrice===""?"":d.playPrice)+'" placeholder="e.g. 1200">'+
+         '<div class="hint">Whatever you quoted them. Leave blank if you have not quoted yet.</div></div>';
+    } else {
+      h+='<div class="row2">'+
+         '<div class="field"><label for="lClasses">Number of classes</label>'+
+         '<input class="inp mono" id="lClasses" type="number" min="1" step="1" value="'+(d.learnClasses===""?"":d.learnClasses)+'" placeholder="e.g. 8"></div>'+
+         '<div class="field"><label for="lLearnPrice">Price quoted</label>'+
+         '<input class="inp mono" id="lLearnPrice" type="number" min="0" step="100" value="'+(d.learnPrice===""?"":d.learnPrice)+'" placeholder="e.g. 14000"></div>'+
+         '</div>';
+      if(d.learnClasses!=="" && +d.learnClasses>0 && d.learnPrice!=="" && +d.learnPrice>0)
+        h+='<div class="hint">Works out at '+inr(Math.round(+d.learnPrice / +d.learnClasses))+' a class.</div>';
+    }
+    h+='</div>';
+
+    h+='<div class="sect"><div class="eyebrow" style="margin-bottom:9px">Follow up</div>'+
+       '<div class="field"><label for="lStage">Stage</label><select class="inp" id="lStage">'+
+       LEAD_STAGES.concat([LEAD_LOST]).map(function(x){
+         return '<option'+(x===d.stage?" selected":"")+(x==="Converted"&&!converted?" disabled":"")+'>'+x+'</option>';
+       }).join("")+'</select>'+
+       (converted?'':'<div class="hint">Converted is set by the button below, so a customer record gets created with it.</div>')+
+       '</div>'+
+       '<div class="field"><label for="lNotes">Notes</label>'+
+       '<textarea class="inp" id="lNotes" rows="2" placeholder="What they asked for, when to call back">'+esc(d.notes)+'</textarea></div>'+
+       '</div>';
+
+    h+='</div>';
+
+    h+='<footer>';
+    if(d.id && perm.admin) h+='<button class="btn btn-danger btn-sm" type="button" id="lDelete">Delete</button>';
+    h+='<div class="right">';
+    if(d.id && !converted && canWrite())
+      h+='<button class="btn btn-gold" type="button" id="lConvert">Convert to customer</button>';
+    h+='<button class="btn" type="button" id="lCancel">Cancel</button>'+
+       '<button class="btn btn-primary" type="button" id="lSave"'+
+       ((errs.length||!canWrite())?' disabled style="opacity:.45;cursor:not-allowed"':'')+'>'+
+       (d.id?"Save":"Save enquiry")+'</button></div></footer></div></div>';
+
+    root.innerHTML=h;
+    wire();
+  }
+
+  function collect(){
+    d.name=$("#lName").value; d.phone=$("#lPhone").value; d.email=$("#lEmail").value;
+    d.source=$("#lSource").value; d.stage=$("#lStage").value; d.notes=$("#lNotes").value;
+    var a=$("#lPlayPrice"); if(a) d.playPrice = a.value===""?"":+a.value;
+    var b=$("#lClasses");   if(b) d.learnClasses = b.value===""?"":+b.value;
+    var c=$("#lLearnPrice");if(c) d.learnPrice = c.value===""?"":+c.value;
+  }
+
+  function wire(){
+    $("#lscrim").onclick=function(e){ if(e.target.id==="lscrim") close(); };
+    $("#lClose").onclick=close; $("#lCancel").onclick=close;
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-lsvc]"), function(b){
+      b.onclick=function(){ collect(); d.service=b.getAttribute("data-lsvc"); draw(); };
+    });
+    ["lName","lPhone","lEmail","lSource","lStage","lNotes","lPlayPrice","lClasses","lLearnPrice"].forEach(function(idf){
+      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); draw(); };
+    });
+
+    var del=$("#lDelete");
+    if(del) del.onclick=function(){
+      var gone=d.id; close(); render();
+      delLead(gone).then(function(){ toast("Enquiry deleted."); }, fail);
+    };
+
+    var conv=$("#lConvert");
+    if(conv) conv.onclick=function(){
+      collect();
+      if(problems().length){ draw(); return; }
+      conv.disabled=true; conv.textContent="Converting…";
+      var rec={}; for(var k in d) rec[k]=d[k];
+      if(!rec.id) rec.id="ld"+uid();
+      putLead(rec)
+        .then(function(){ return convertLead(rec); })
+        .then(function(res){
+          close(); render();
+          toast(res.reused ? rec.name+" was already a customer, enquiry linked to them."
+                           : rec.name+" is now a customer.");
+        }, function(e){ conv.disabled=false; conv.textContent="Convert to customer"; fail(e); });
+    };
+
+    $("#lSave").onclick=function(){
+      collect();
+      if(problems().length){ draw(); return; }
+      var rec={}; for(var k in d) rec[k]=d[k];
+      var isNew=!rec.id;
+      if(isNew){ rec.id="ld"+uid(); rec.createdBy=perm.name||""; }
+      close();
+      putLead(rec).then(function(){
+        render(); toast(isNew ? "Enquiry saved for "+rec.name+"." : "Enquiry updated.");
+      }, fail);
+    };
+  }
+  draw();
+}
+
 /* ============ CUSTOMERS ============ */
 function viewCustomers(){
   if(state.customerOpen) return customerDetail(state.customerOpen);
@@ -1024,6 +1395,8 @@ function viewDashboard(){
     openRuns(tb.id,td,sl2).forEach(function(r){ partTables++; freeSeats+=r.free; });
   });
   var seatsToday=tdB.reduce(function(s2,b){ return s2+(+b.guests||0); },0);
+  var openLeads=DB.leads.filter(function(l){ return l.stage!=="Converted" && l.stage!==LEAD_LOST; });
+  var leadValueOpen=openLeads.reduce(function(s2,l){ return s2+leadValue(l); },0);
 
   var h='<div class="page-head"><div><h2>Dashboard</h2><p>'+fmtDate(td)+' &middot; '+dayName(td)+'</p></div></div>';
   h+='<div class="stats">'+
@@ -1031,7 +1404,8 @@ function viewDashboard(){
     stat("Seats to fill","<span class=\"mono\">"+freeSeats+"</span>",partTables+" part-full table"+(partTables===1?"":"s")+" today")+
     stat("In play now","<span class=\"mono\">"+occupied+"/"+activeTables().length+"</span>","tables occupied")+
     stat("Collected today",inr(revToday),"of "+inr(expToday)+" expected")+
-    stat("Outstanding",inr(outstanding),newLeads+" new lead"+(newLeads===1?"":"s")+" unconverted", outstanding>0)+
+    stat("Outstanding",inr(outstanding),newLeads+" booking"+(newLeads===1?"":"s")+" not yet confirmed", outstanding>0)+
+    stat("Open enquiries","<span class=\"mono\">"+openLeads.length+"</span>",leadValueOpen?inr(leadValueOpen)+" quoted":"nothing quoted yet")+
     '</div>';
 
   h+='<div class="two">';
