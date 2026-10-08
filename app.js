@@ -747,7 +747,7 @@ function openBooking(id, pre){
        (d.customerId?'<div class="hint" style="color:var(--jade)">Customer selected</div>'
                     :'<div class="hint">Existing customers only. New people start as an enquiry.</div>')+
        '</div>'+
-       '<div class="field"><label for="fPhone">Phone number</label><input class="inp" id="fPhone" value="'+esc(d.phone)+'" placeholder="+91 98XXX XXXXX"></div></div>';
+       '<div class="field"><label for="fPhone">Phone number</label><input class="inp" id="fPhone" type="tel" inputmode="tel" autocomplete="tel" value="'+esc(d.phone)+'" placeholder="+91 98XXX XXXXX"></div></div>';
     h+='<div id="suggBox"></div>';
     h+='<div class="row2"><div class="field"><label for="fEmail">Email <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>'+
        '<input class="inp" id="fEmail" type="email" value="'+esc(d.email)+'"></div>'+
@@ -1290,6 +1290,27 @@ function openLead(id, pre){
     notes:"", stage:"New", customerId:""
   };
 
+  var lastDupe=null;
+
+  /* The duplicate-number warning, on its own so it can be repainted
+     without touching the rest of the form. See paintDupe. */
+  function dupeHTML(){
+    var owner = phoneOwner(d.phone, d.id, d.customerId);
+    if(!owner) return "";
+    if(owner.kind==="lead"){
+      return '<div class="alert bad"><b>That number is already on file.</b><br>'+
+        esc(owner.rec.name)+' enquired on this number and is sitting at <b>'+esc(owner.rec.stage)+'</b>. '+
+        'Two enquiries for one number means two people chasing the same person.'+
+        '<br><button class="btn btn-sm" type="button" id="lGoDupe" style="margin-top:8px">Open '+
+        esc(owner.rec.name)+'’s enquiry</button></div>';
+    }
+    return '<div class="alert bad"><b>Already a customer.</b><br>'+
+      esc(owner.rec.name)+' is on this number already, so they do not need a new enquiry. '+
+      'Book them straight from the Schedule.'+
+      '<br><button class="btn btn-sm" type="button" id="lGoCust" style="margin-top:8px">Open '+
+      esc(owner.rec.name)+'’s record</button></div>';
+  }
+
   var root=$("#modalRoot");
   function close(){ root.innerHTML=""; document.removeEventListener("keydown",onKey); }
   function onKey(e){ if(e.key==="Escape") close(); }
@@ -1314,24 +1335,10 @@ function openLead(id, pre){
        '<button class="x" type="button" id="lClose" aria-label="Close">&times;</button></header>';
     h+='<div class="body">';
 
-    var owner = phoneOwner(d.phone, d.id, d.customerId);
     var plain = errs.filter(function(x){ return x!=="__DUPE__"; });
     if(plain.length) h+='<div class="alert bad"><b>Can’t save yet</b><br>'+plain.join("<br>")+'</div>';
-    if(owner){
-      if(owner.kind==="lead"){
-        h+='<div class="alert bad"><b>That number is already on file.</b><br>'+
-           esc(owner.rec.name)+' enquired on this number and is sitting at <b>'+esc(owner.rec.stage)+'</b>. '+
-           'Two enquiries for one number means two people chasing the same person.'+
-           '<br><button class="btn btn-sm" type="button" id="lGoDupe" style="margin-top:8px">Open '+esc(owner.rec.name)+'\u2019s enquiry</button>'+
-           '</div>';
-      } else {
-        h+='<div class="alert bad"><b>Already a customer.</b><br>'+
-           esc(owner.rec.name)+' is on this number already, so they do not need a new enquiry. '+
-           'Book them straight from the Schedule.'+
-           '<br><button class="btn btn-sm" type="button" id="lGoCust" style="margin-top:8px">Open '+esc(owner.rec.name)+'\u2019s record</button>'+
-           '</div>';
-      }
-    }
+    lastDupe = dupeHTML();
+    h+='<div id="lDupe">'+lastDupe+'</div>';
     if(converted){
       var ps=payInfoLead(d), owed=stillOwed(d);
       h+='<div class="alert" style="background:var(--jade-bg);border-color:var(--jade-line);color:var(--jade)">'+
@@ -1343,7 +1350,7 @@ function openLead(id, pre){
     h+='<div class="sect"><div class="eyebrow" style="margin-bottom:9px">Who got in touch</div>'+
        '<div class="row2">'+
        '<div class="field"><label for="lName">Full name</label><input class="inp" id="lName" value="'+esc(d.name)+'"></div>'+
-       '<div class="field"><label for="lPhone">Phone number</label><input class="inp" id="lPhone" value="'+esc(d.phone)+'" placeholder="+91 98XXX XXXXX"></div>'+
+       '<div class="field"><label for="lPhone">Phone number</label><input class="inp" id="lPhone" type="tel" inputmode="tel" autocomplete="tel" value="'+esc(d.phone)+'" placeholder="+91 98XXX XXXXX"></div>'+
        '</div><div class="row2">'+
        '<div class="field"><label for="lEmail">Email <span style="text-transform:none;letter-spacing:0;font-weight:400">(optional)</span></label>'+
        '<input class="inp" id="lEmail" type="email" value="'+esc(d.email)+'"></div>'+
@@ -1429,21 +1436,37 @@ function openLead(id, pre){
     var c=$("#lLearnPrice");if(c) d.learnPrice = c.value===""?"":+c.value;
   }
 
-  function wire(){
-    $("#lscrim").onclick=function(e){ if(e.target.id==="lscrim") close(); };
-    $("#lClose").onclick=close; $("#lCancel").onclick=close;
+  /* Repaint ONLY the duplicate warning and the Save button.
 
-    Array.prototype.forEach.call(document.querySelectorAll("[data-lsvc]"), function(b){
-      b.onclick=function(){ collect(); d.service=b.getAttribute("data-lsvc"); draw(); };
-    });
-    ["lName","lPhone","lEmail","lSource","lStage","lNotes","lPlayPrice","lClasses","lLearnPrice","lParty"].forEach(function(idf){
-      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); scheduleDraw(); };
-    });
-    /* Warn about a number already on file while it is being typed, not only
-       once the field is left. Debounced so it waits for a pause. */
-    var ph=$("#lPhone");
-    if(ph) ph.oninput=function(){ collect(); scheduleDraw(350); };
+     The phone field must never trigger a redraw of the whole form. On iOS,
+     rebuilding an input while someone is typing closes the number pad and
+     drops the keyboard back to letters, which made the field close to
+     unusable on an iPad: one digit, half a second, back to letters. Nothing
+     else in this form depends on the phone number, so there is no reason to
+     redraw anything but these two things. */
+  function paintDupe(){
+    var box=$("#lDupe");
+    if(!box) return;
+    var html=dupeHTML();
+    /* Only touch the DOM when the warning actually changed. Leaving the
+       field is itself an event, so without this guard tapping "Open their
+       enquiry" would blur the phone box, rebuild the warning, and destroy
+       the button halfway through the tap. */
+    if(html!==lastDupe){
+      lastDupe=html;
+      box.innerHTML=html;
+      wireDupeButtons();
+    }
+    var sv=$("#lSave");
+    if(sv){
+      var blocked = problems().length>0 || !canWrite();
+      sv.disabled = blocked;
+      sv.style.opacity = blocked ? ".45" : "";
+      sv.style.cursor  = blocked ? "not-allowed" : "";
+    }
+  }
 
+  function wireDupeButtons(){
     var goDupe=$("#lGoDupe");
     if(goDupe) goDupe.onclick=function(){
       var o=phoneOwner(d.phone, d.id, d.customerId);
@@ -1459,6 +1482,27 @@ function openLead(id, pre){
       state.customerOpen=o.rec.id;
       go("customers");
     };
+  }
+
+  function wire(){
+    $("#lscrim").onclick=function(e){ if(e.target.id==="lscrim") close(); };
+    $("#lClose").onclick=close; $("#lCancel").onclick=close;
+
+    Array.prototype.forEach.call(document.querySelectorAll("[data-lsvc]"), function(b){
+      b.onclick=function(){ collect(); d.service=b.getAttribute("data-lsvc"); draw(); };
+    });
+    ["lName","lEmail","lSource","lStage","lNotes","lPlayPrice","lClasses","lLearnPrice","lParty"].forEach(function(idf){
+      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); scheduleDraw(); };
+    });
+    /* Warn about a number already on file as it is typed, without rebuilding
+       the field underneath the person typing into it. */
+    var ph=$("#lPhone");
+    if(ph){
+      ph.oninput  = function(){ d.phone=ph.value; paintDupe(); };
+      ph.onchange = function(){ d.phone=ph.value; paintDupe(); };
+    }
+
+    wireDupeButtons();
 
     var del=$("#lDelete");
     if(del) del.onclick=function(){
@@ -1821,7 +1865,7 @@ function viewSettings(){
       '<button class="btn btn-sm" type="button" data-tt="'+t.id+'">'+(t.active?"Active":"Inactive")+'</button></div>';
   });
   h+='</div><div class="row2" style="margin-top:12px">'+
-    '<input class="inp" id="ntName" placeholder="Teacher name"><input class="inp" id="ntPhone" placeholder="Phone"></div>'+
+    '<input class="inp" id="ntName" placeholder="Teacher name"><input class="inp" id="ntPhone" type="tel" inputmode="tel" placeholder="Phone"></div>'+
     '<button class="btn btn-sm btn-primary" type="button" id="addTeacher" style="margin-top:8px">Add teacher</button></div>';
 
   h+='<div class="panel"><h3>Tables</h3><div class="ul">';
