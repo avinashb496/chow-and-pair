@@ -58,19 +58,46 @@ function payInfo(v){ for(var i=0;i<PAY.length;i++) if(PAY[i].v===v) return PAY[i
 function isClosed(b){ return CLOSED.indexOf(b.stage)>=0; }
 
 function setHTML(el, html){
-  /* Re-rendering a modal while an input still has focus makes the browser
-     fire blur mid-teardown, and innerHTML then throws. Blur first, and keep
-     a manual fallback for the case where it still objects. */
+  /* Re-rendering a modal destroys every field in it. Without this, leaving
+     one field redraws the form and eats the field you just clicked into, so
+     your typing goes nowhere. Remember what had focus and where the cursor
+     sat, rebuild, then put both back. */
+  var fid=null, selA=null, selB=null, scrolled=null;
   try{
     var a=document.activeElement;
-    if(a && a.blur && el.contains(a)) a.blur();
+    if(a && el.contains(a)){
+      fid = a.id || null;
+      if(typeof a.selectionStart === "number"){ selA=a.selectionStart; selB=a.selectionEnd; }
+      if(a.blur) a.blur();
+    }
   }catch(e){}
+  try{
+    var oldBody = el.querySelector(".modal .body");
+    if(oldBody) scrolled = oldBody.scrollTop;
+  }catch(e){}
+
   try{ el.innerHTML = html; }
   catch(e){
     while(el.firstChild) el.removeChild(el.firstChild);
     el.insertAdjacentHTML("beforeend", html);
   }
+
+  try{
+    var newBody = el.querySelector(".modal .body");
+    if(newBody && scrolled!=null) newBody.scrollTop = scrolled;
+  }catch(e){}
+
+  if(fid){
+    try{
+      var n = document.getElementById(fid);
+      if(n && el.contains(n)){
+        n.focus({preventScroll:true});
+        if(selA!=null && n.setSelectionRange) n.setSelectionRange(selA, selB);
+      }
+    }catch(e){}
+  }
 }
+
 function toast(msg){
   var r=$("#toastRoot"); r.innerHTML="";
   var t=el("div",{class:"toast"},esc(msg)); r.appendChild(t);
@@ -148,6 +175,13 @@ function pgMsg(e){
     if(msg.indexOf("learn_has_teacher")>=0) return "A To Learn booking needs a teacher.";
     if(msg.indexOf("end_after_start")>=0) return "The end time has to be after the start time.";
     return "The database refused those values. Check the times and amounts.";
+  }
+  if(code==="23505"){
+    if(msg.indexOf("leads_phone_unique")>=0)
+      return "Another enquiry already uses that phone number. Open that one instead of starting a second.";
+    if(msg.indexOf("customers_phone_unique")>=0)
+      return "A customer already has that phone number.";
+    return "Something with that value already exists.";
   }
   if(code==="23503") return "That customer, table or teacher no longer exists. Reload the page.";
   if(code==="42501" || code==="PGRST301") return "You don't have permission to make that change.";
@@ -784,6 +818,20 @@ function openBooking(id, pre){
     wire();
   }
 
+  var drawT=null;
+  function scheduleDraw(ms){
+    /* Draw on the next tick, not right now. A click from one field to the
+       next fires change BEFORE focus lands, so an immediate redraw destroys
+       the field being clicked into. One tick later the focus has arrived and
+       setHTML can put it back. */
+    if(drawT) clearTimeout(drawT);
+    drawT=setTimeout(function(){
+      drawT=null;
+      if(!document.getElementById("fName")) return;   /* closed meanwhile */
+      collect(); draw();
+    }, ms||0);
+  }
+
   function collect(){
     d.customerName=$("#fName").value; d.phone=$("#fPhone").value; d.email=$("#fEmail").value;
     d.source=$("#fSource").value; d.date=$("#fDate").value||d.date;
@@ -812,16 +860,16 @@ function openBooking(id, pre){
     });
 
     ["fPhone","fEmail","fSource","fTable","fGuests","fTeacher","fDue","fPaid","fNotes"].forEach(function(idf){
-      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); draw(); };
+      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); scheduleDraw(); };
     });
-    $("#fDate").onchange=function(){ collect(); draw(); };
+    $("#fDate").onchange=function(){ collect(); scheduleDraw(); };
     $("#fStart").onchange=function(){
       var old=t2m(d.start), dur=t2m(d.end)-old;
       collect();
       if(dur>0) d.end=m2t(t2m(d.start)+dur);
       draw();
     };
-    $("#fEnd").onchange=function(){ collect(); draw(); };
+    $("#fEnd").onchange=function(){ collect(); scheduleDraw(); };
     $("#fPay").onchange=function(){
       collect();
       if(d.payment==="paid") d.amountPaid=d.amountDue;
@@ -830,8 +878,8 @@ function openBooking(id, pre){
       if(d.payment==="paid" && (d.stage==="New Lead"||d.stage==="Confirmed")) d.stage="Paid";
       draw();
     };
-    $("#fStage").onchange=function(){ collect(); draw(); };
-    var ov=$("#fOverride"); if(ov) ov.onchange=function(){ collect(); draw(); };
+    $("#fStage").onchange=function(){ collect(); scheduleDraw(); };
+    var ov=$("#fOverride"); if(ov) ov.onchange=function(){ collect(); scheduleDraw(); };
 
     /* customer search */
     var nameI=$("#fName");
@@ -1043,6 +1091,26 @@ function moveStage(bid, stage){
 /* ============ LEADS / ENQUIRIES ============ */
 function lead(id){ return DB.leads.filter(function(l){ return l.id===id; })[0] || null; }
 
+/* The database compares numbers on their last ten digits, so
+   "+91 98111 22333", "098111 22333" and "9811122333" are one person.
+   This mirrors public.phone_key() so the form and the database agree. */
+function phoneKey(p){ return String(p||"").replace(/\D/g,"").slice(-10); }
+
+/* Who already owns this number. Returns null when it is free.
+   exceptLead and exceptCustomer let an enquiry ignore itself and the
+   customer it converted into, which legitimately share a number. */
+function phoneOwner(phone, exceptLead, exceptCustomer){
+  var k=phoneKey(phone);
+  if(k.length<7) return null;          /* too short to be a real mobile */
+  var l=DB.leads.filter(function(x){
+    return x.id!==exceptLead && phoneKey(x.phone)===k; })[0];
+  if(l) return { kind:"lead", rec:l };
+  var c=DB.customers.filter(function(x){
+    return x.id!==exceptCustomer && phoneKey(x.phone)===k; })[0];
+  if(c) return { kind:"customer", rec:c };
+  return null;
+}
+
 function leadQuote(l){
   if(l.service==="learn"){
     var parts=[];
@@ -1232,6 +1300,7 @@ function openLead(id, pre){
     if(!d.name.trim()) e.push("Enquirer's name is required.");
     if(!d.phone.trim()) e.push("A phone number is required, it's how you'll follow up.");
     if(d.service==="learn" && d.learnClasses!=="" && +d.learnClasses<=0) e.push("Number of classes has to be more than zero.");
+    if(phoneOwner(d.phone, d.id, d.customerId)) e.push("__DUPE__");
     return e;
   }
 
@@ -1245,7 +1314,24 @@ function openLead(id, pre){
        '<button class="x" type="button" id="lClose" aria-label="Close">&times;</button></header>';
     h+='<div class="body">';
 
-    if(errs.length) h+='<div class="alert bad"><b>Can’t save yet</b><br>'+errs.join("<br>")+'</div>';
+    var owner = phoneOwner(d.phone, d.id, d.customerId);
+    var plain = errs.filter(function(x){ return x!=="__DUPE__"; });
+    if(plain.length) h+='<div class="alert bad"><b>Can’t save yet</b><br>'+plain.join("<br>")+'</div>';
+    if(owner){
+      if(owner.kind==="lead"){
+        h+='<div class="alert bad"><b>That number is already on file.</b><br>'+
+           esc(owner.rec.name)+' enquired on this number and is sitting at <b>'+esc(owner.rec.stage)+'</b>. '+
+           'Two enquiries for one number means two people chasing the same person.'+
+           '<br><button class="btn btn-sm" type="button" id="lGoDupe" style="margin-top:8px">Open '+esc(owner.rec.name)+'\u2019s enquiry</button>'+
+           '</div>';
+      } else {
+        h+='<div class="alert bad"><b>Already a customer.</b><br>'+
+           esc(owner.rec.name)+' is on this number already, so they do not need a new enquiry. '+
+           'Book them straight from the Schedule.'+
+           '<br><button class="btn btn-sm" type="button" id="lGoCust" style="margin-top:8px">Open '+esc(owner.rec.name)+'\u2019s record</button>'+
+           '</div>';
+      }
+    }
     if(converted){
       var ps=payInfoLead(d), owed=stillOwed(d);
       h+='<div class="alert" style="background:var(--jade-bg);border-color:var(--jade-line);color:var(--jade)">'+
@@ -1324,6 +1410,16 @@ function openLead(id, pre){
     wire();
   }
 
+  var drawT=null;
+  function scheduleDraw(ms){
+    if(drawT) clearTimeout(drawT);
+    drawT=setTimeout(function(){
+      drawT=null;
+      if(!document.getElementById("lName")) return;   /* closed meanwhile */
+      collect(); draw();
+    }, ms||0);
+  }
+
   function collect(){
     d.name=$("#lName").value; d.phone=$("#lPhone").value; d.email=$("#lEmail").value;
     d.source=$("#lSource").value; d.stage=$("#lStage").value; d.notes=$("#lNotes").value;
@@ -1341,8 +1437,28 @@ function openLead(id, pre){
       b.onclick=function(){ collect(); d.service=b.getAttribute("data-lsvc"); draw(); };
     });
     ["lName","lPhone","lEmail","lSource","lStage","lNotes","lPlayPrice","lClasses","lLearnPrice","lParty"].forEach(function(idf){
-      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); draw(); };
+      var e=$("#"+idf); if(e) e.onchange=function(){ collect(); scheduleDraw(); };
     });
+    /* Warn about a number already on file while it is being typed, not only
+       once the field is left. Debounced so it waits for a pause. */
+    var ph=$("#lPhone");
+    if(ph) ph.oninput=function(){ collect(); scheduleDraw(350); };
+
+    var goDupe=$("#lGoDupe");
+    if(goDupe) goDupe.onclick=function(){
+      var o=phoneOwner(d.phone, d.id, d.customerId);
+      if(!o) return;
+      close();
+      openLead(o.rec.id);
+    };
+    var goCust=$("#lGoCust");
+    if(goCust) goCust.onclick=function(){
+      var o=phoneOwner(d.phone, d.id, d.customerId);
+      if(!o) return;
+      close();
+      state.customerOpen=o.rec.id;
+      go("customers");
+    };
 
     var del=$("#lDelete");
     if(del) del.onclick=function(){
