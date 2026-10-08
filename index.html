@@ -444,6 +444,23 @@ table.dt tbody tr:hover{background:var(--surface-2)}
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="config.js"></script>
-<script src="app.js"></script>
+<script>
+/* Why app.js is loaded this way rather than with a plain <script src>.
+
+   Static hosts cache JavaScript hard, and Safari hardest of all, so after
+   an update the browser can keep running the old copy for hours. That has
+   bitten this site twice: the site looks unchanged while the database has
+   already moved on, which is confusing and looks like a bug.
+
+   Asking for a slightly different URL every five minutes forces the
+   browser to come back and check. The cost is one extra download of a
+   100KB file at most once per page load, which is nothing. The benefit is
+   that nobody ever has to clear a cache again. */
+(function () {
+  var s = document.createElement("script");
+  s.src = "app.js?v=" + Math.floor(Date.now() / 300000);
+  document.body.appendChild(s);
+})();
+</script>
 </body>
 </html>
